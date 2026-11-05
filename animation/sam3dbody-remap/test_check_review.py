@@ -48,6 +48,27 @@ class ReviewGateTests(unittest.TestCase):
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn('PROMPT', result.stdout)
 
+    def test_link_reference_titles_do_not_count_as_picture_evidence(self):
+        text, transcript = self.shipped_fixture()
+        hidden, count = re.subn(r'(?m)^  (see: frame(\d+)\.png f1:.*)$',
+                               lambda m: '\n  [hidden-frame' + m.group(2) + ']: /url "' + m.group(1) + '"', text)
+        self.assertEqual(4, count)
+        self.copy.write_text(hidden, encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn('NO_LOOK', result.stdout)
+
+    def test_multiline_reference_titles_cannot_hide_evidence_or_reasons(self):
+        text, transcript = self.shipped_fixture()
+        for kind in ('see', 'reason'):
+            with self.subTest(kind=kind):
+                pattern = r'(?m)^  (' + kind + r':.*)$'
+                hidden, count = re.subn(pattern, lambda m: '\n  [hidden-label]: /url "first\n  ' + m.group(1) + '\n  last"', text)
+                self.assertGreater(count, 0)
+                self.copy.write_text(hidden, encoding='utf-8')
+                result = self.run_gate('--transcript', str(transcript))
+                self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+
     def test_shipped_copy_allows_marks_evidence_and_blank_signoff(self):
         text, transcript = self.shipped_fixture()
         text = re.sub(r'(?m)^- \[-\] (\*\*11\.[12]\*\*[^\n]*)\n  reason: not applicable to this clip',

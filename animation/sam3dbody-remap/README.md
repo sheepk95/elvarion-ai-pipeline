@@ -145,6 +145,10 @@ with `## `; each complete prompt must be on its checkbox line, with at most thre
 inside HTML comments or backtick/tilde fenced code blocks do not count; boxes indented by four spaces or a tab do
 not count. Put evidence and reasons on separate lines beneath a live box, indented by exactly two or three spaces
 more than the box, outside comments and fences. Deeper indentation and tabs are not accepted for evidence.
+Each picture entry must be a standalone `see:` line; a string inside a link definition or other Markdown is not evidence.
+Reference-style links are unsupported. Outside comments and fences, bracket-colon sequences such as `]:` (including
+whitespace before the colon) are conservatively refused, even inside inline-code examples, because reference titles
+can hide subsequent checklist or evidence lines. Use inline links instead.
 Use the same simple layout for a custom master and its copy; multiline prompts and nested lists are unsupported.
 Raw HTML-like tags and declarations in active text are refused, including tags with attributes split across lines. Single-line
 inline code spans may contain angle-bracket placeholders. Lines combining backticks and HTML comment delimiters

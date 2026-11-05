@@ -40,7 +40,7 @@ MASTER = os.environ.get("REVIEW_CHECKLIST", os.path.join(HERE, "REVIEW-CHECKLIST
 PROJECTS = os.environ.get("CLAUDE_PROJECTS_DIR", os.path.join(os.path.expanduser("~"), ".claude", "projects"))
 PIC = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 BOX = re.compile(r"^ {0,3}-\s*\[(.)\]\s*(?:\*\*)?\s*(\d+\.\d+[a-z]?)?")
-SEE = re.compile(r"see:\s*(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|([^\s`\"']+))\s+(f\d+(?:\s*-\s*\d+)?(?:\s*,\s*f?\d+(?:\s*-\s*\d+)?)*)\s*:\s*(.+)", re.I)
+SEE = re.compile(r"^[ \t]*see:[ \t]*(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|([^\s`\"']+))[ \t]+(f\d+(?:[ \t]*-[ \t]*\d+)?(?:[ \t]*,[ \t]*f?\d+(?:[ \t]*-[ \t]*\d+)?)*)[ \t]*:[ \t]*(.+)$", re.I | re.M)
 REASON = re.compile(r"^[ \t]*reason:[ \t]*([^\r\n]+)$", re.I | re.M)
 FRAMES = re.compile(r"\bf\d+", re.I)
 
@@ -157,6 +157,11 @@ def items(text):
     return out
 
 
+def has_reference_markup(text):
+    """Conservatively refuse bracket-colon reference syntax, including ambiguous inline-code uses."""
+    return any(line is not None and re.search(r'\][ \t]*:', line) for line in active_lines(text))
+
+
 def prompt(it):
     """First box line without its mark; allow surrounding whitespace, not rewritten prompts."""
     return re.sub(r"^\s*-\s*\[.\]\s*", "", it[2].splitlines()[0]).strip()
@@ -259,6 +264,8 @@ def main():
     text = open(copy, encoding="utf-8", errors="replace").read()
     if has_html(master_text):
         usage("master checklist contains unsupported raw HTML")
+    if has_reference_markup(master_text):
+        usage("master checklist contains unsupported reference-style bracket-colon markup")
     master = items(master_text)
     want_ids = [i for i, _, _, _ in master if i]
     if len(set(want_ids)) != len(want_ids):
@@ -275,6 +282,8 @@ def main():
     P = lambda code, msg: problems.append(f"CHECK_REVIEW {code} {msg}")
     if has_html(text):
         P("HTML", "raw HTML is unsupported in the checklist copy")
+    if has_reference_markup(text):
+        P("REFERENCE", "reference-style bracket-colon markup is unsupported in the checklist copy")
     for item_id, count in Counter(it[0] for it in got if it[0]).items():
         if count > 1:
             P("DUPLICATE", f"{item_id}: appears {count} times in the copy")
