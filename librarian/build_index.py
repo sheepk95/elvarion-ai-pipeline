@@ -90,6 +90,12 @@ def frontmatter(path):
         txt = open(path, encoding="utf-8", errors="replace").read(20000)
     except OSError:
         return {}
+    return parse_frontmatter(txt)
+
+
+def parse_frontmatter(txt):
+    """Parse the supported scalar/block metadata, shared with the stdlib catalogue fallback."""
+    txt = txt.lstrip('\ufeff')
     if not txt.startswith("---"):
         return {}
     end = txt.find("\n---", 3)
@@ -102,7 +108,7 @@ def frontmatter(path):
             continue
         k, v = m.group(1), m.group(2).strip()
         i += 1
-        if v in (">", "|", ">-", "|-", ">+", "|+"):
+        if re.fullmatch(r"[>|](?:[1-9][+-]?|[+-][1-9]?)?(?:\s+#.*)?", v):
             buf = []
             while i < len(lines) and (lines[i].startswith(" ") or not lines[i].strip()):
                 buf.append(lines[i].strip())

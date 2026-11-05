@@ -83,8 +83,9 @@ in its desk file.
 
 - **Exit 5:** a chat's inbox waiter is dead while an item has waited more than 15 minutes. It watches
   `coordinator/inbox`, each `lanes/<slug>/inbox` and each role folder `lanes/<slug>/inbox/<role>`.
-  - With the shipped `pipeline/tools/wait_inbox.py`, a waiter is dead when its `.waiter.pid` is missing or names a
-    process that has ended or is not Python (a reused pid).
+  - With the shipped `pipeline/tools/wait_inbox.py`, a waiter is unavailable when its `.waiter.pid` is missing or names a
+    process whose creation time differs, has ended, or cannot be verified. PID-only legacy registrations are unknown;
+    re-arm them to create `.waiter.identity`. The creation-time check is supported on Windows.
   - An item is handled once its file name is in that inbox's `.seen`.
   - A chat that works on one item for more than 15 minutes without touching `.seen` also trips it: the recovery message
     then just waits in its queue.

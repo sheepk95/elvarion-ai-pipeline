@@ -7,7 +7,7 @@ Exit 0: a new [DESK Q] is waiting (run desk_read.py, handle it, re-arm). Exit 2:
 Exit 4: another watcher touched watch.alive within the last 3 intervals. It never moves the read offsets.
 Exit 5: a pipeline inbox has a dead waiter and an item waiting >15 min. Watched: coordinator/inbox, each
 lanes/<slug>/inbox and each role folder lanes/<slug>/inbox/<role>. With the shipped waiter
-(pipeline/tools/wait_inbox.py) a waiter is dead when its .waiter.pid is missing or names a process that is gone or is not Python (a reused pid). A
+(pipeline/tools/wait_inbox.py) a waiter is considered unavailable when its PID and creation identity do not match, or identity is unknown. A
 waiter that writes .waiter-arm and .waiter-heartbeat is dead when the heartbeat is >10 min old, the arm id is stale
 or the arm says 'cleared'. An item is handled once its file name is in the inbox's .seen, or its id is done or
 parked in ACKS.md. Skipped while the receiver wrote ACKS.md or .seen in the last 10 min (busy on the item its
@@ -33,7 +33,7 @@ hence max-seconds 6900. Not a timer for anything else: it only looks at desk fil
 """
 import argparse
 import calendar
-import ctypes
+import importlib.util
 import hashlib
 import json
 import os
@@ -196,46 +196,19 @@ def norm_stamp(text):
     return time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(ts)) if ts is not None else '?'
 
 
-def pid_alive(pid):
-    """True while that process lives AND runs Python (the waiter is a Python script). A reused pid that now names
-    another program counts as gone, and so does a process this user may not open, as in
-    pipeline/tools/switch_census.py alive(). Windows: OpenProcess, GetExitCodeProcess and QueryFullProcessImageNameW
-    (os.kill would end the process there). Elsewhere: os.kill(pid, 0), then /proc/<pid>/cmdline where it exists."""
-    if not pid or pid < 0:
-        return False
-    if os.name != 'nt':
-        try:
-            os.kill(pid, 0)
-        except OSError:   # gone, or another user's process (PermissionError): not this user's waiter
-            return False
-        try:
-            with open('/proc/%d/cmdline' % pid, 'rb') as f:
-                return b'python' in f.read().lower()
-        except OSError:
-            return True   # no /proc (macOS): the process lives; its program cannot be read here
-    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
-    k32.OpenProcess.restype = ctypes.c_void_p
-    k32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
-    k32.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
-    k32.QueryFullProcessImageNameW.argtypes = (ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p,
-                                               ctypes.POINTER(ctypes.c_ulong))
-    k32.CloseHandle.argtypes = (ctypes.c_void_p,)
-    handle = k32.OpenProcess(0x1000, False, int(pid))   # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return False   # gone, or access denied: a waiter this user started is one this user can open
+def pipeline_waiter_status(inbox, pipeline_root):
+    """A missing identity helper is unknown, never evidence of an armed waiter."""
+    path = os.path.join(pipeline_root, 'tools', 'waiter_identity.py')
     try:
-        code = ctypes.c_ulong()
-        if not k32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:   # STILL_ACTIVE
-            return False
-        buf, n = ctypes.create_unicode_buffer(1024), ctypes.c_ulong(1024)
-        if not k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(n)):
-            return True   # running, program unreadable: not shown to be a reused pid
-        return 'python' in buf.value.lower()
-    finally:
-        k32.CloseHandle(handle)
+        spec = importlib.util.spec_from_file_location('waiter_identity', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.status(inbox)
+    except (OSError, ImportError, AttributeError):
+        return 'UNKNOWN'
 
 
-def waiter_state(inbox, now):
+def waiter_state(inbox, now, pipeline_root=''):
     """Return (dead, reason, arm part of the key, chat id or None). Formats (the inbox waiter's 'key: value' lines, or
     key=value, or positional words):
     .waiter-arm = 'chat: <id>/pid: <pid>/arm: <armid>/started: <UTC>' or 'chat=<id> pid=<pid> arm=<armid>' or
@@ -247,13 +220,15 @@ def waiter_state(inbox, now):
     if arm_txt is None and hb_txt is None:
         pid_txt = read_text(os.path.join(inbox, '.waiter.pid'))
         if pid_txt is not None:
+            state = pipeline_waiter_status(inbox, pipeline_root)
             try:
                 pid = int(pid_txt.strip())
+                key = 'pid-%d' % pid if 0 < pid <= 0xffffffff else 'pid-bad'
             except ValueError:
-                return True, 'bad .waiter.pid', 'pid-bad', None
-            if pid_alive(pid):
-                return False, 'alive', 'pid-%d' % pid, None
-            return True, 'waiter pid %d gone' % pid, 'pid-%d' % pid, None
+                key = 'pid-bad'
+            if state == 'ARMED':
+                return False, 'alive', key, None
+            return True, ('waiter gone or replaced' if state == 'DEAD' else 'waiter identity unknown; re-arm'), key, None
     arm_tok = (arm_txt or '').split()
     kv = _kv(arm_txt)
     if arm_tok and arm_tok[0] == 'cleared':
@@ -448,7 +423,7 @@ def dead_waiter_hits(p, elv, now, open_chats=(), again_s=REPORT_AGAIN_S):
     hits, keys, marks = [], [], []
     for slug, inbox in inbox_dirs(elv):
         try:   # one unreadable arm, heartbeat, ACKS.md or listing skips only this inbox, loudly, never as 'dead'
-            dead, why, arm, chat = waiter_state(inbox, now)
+            dead, why, arm, chat = waiter_state(inbox, now, elv)
             ids = waiting_items(inbox, now)
         except Unreadable as e:
             WARN.add('WARNING inbox %s: %s; skipped this poll (not read as a dead waiter)' % (slug, e))
@@ -516,7 +491,7 @@ def waiting_for_chat(elv, chat, now):
     'none' when that inbox holds none; 'unknown (...)' when no inbox names the chat or it cannot be read."""
     for slug, inbox in inbox_dirs(elv):
         try:
-            if waiter_state(inbox, now)[3] == chat:
+            if waiter_state(inbox, now, elv)[3] == chat:
                 return ', '.join(waiting_items(inbox, now)) or 'none'
         except Unreadable as e:
             WARN.add('WARNING inbox %s: %s; skipped this poll' % (slug, e))

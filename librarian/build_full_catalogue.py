@@ -40,7 +40,7 @@ PART_MAX_BYTES = 45000
 LARGE_BYTES = 50000
 READ_REFUSE_BYTES = 262144
 PART_PREFIX = "CATALOGUE-PART-"
-ENTRY_FORMAT = 2  # entries carry no byte count; a manifest with another (or no) format forces one rebuild
+ENTRY_FORMAT = 3  # refresh older catalogues whose stdlib fallback lost block descriptions
 FILL_RATIO = 0.9  # a fresh split fills parts to 90% of the cap so later additions keep the boundaries
 
 
@@ -62,10 +62,13 @@ def frontmatter(path):
         import yaml
         d = yaml.safe_load(m.group(1))
         return (d if isinstance(d, dict) else None), "ok"
-    except Exception as e:  # no PyYAML (python -I) or bad YAML: single-line scan
-        mm = re.search(r"^description:\s*(.*)$", m.group(1), re.M)
-        if mm:
-            return {"description": mm.group(1).strip().strip("\"'")}, "line fallback: %s" % type(e).__name__
+    except Exception as e:  # no PyYAML or bad YAML: reuse the index's scalar/block metadata parser
+        if HERE not in sys.path:
+            sys.path.insert(0, HERE)  # python -I leaves the script's folder off sys.path
+        from build_index import parse_frontmatter
+        d = parse_frontmatter(t)
+        if d.get("description"):
+            return d, "stdlib fallback: %s" % type(e).__name__
         return None, "yaml error: %s" % type(e).__name__
 
 

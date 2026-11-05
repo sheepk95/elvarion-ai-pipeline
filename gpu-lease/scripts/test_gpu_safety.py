@@ -105,6 +105,26 @@ class SafetyTests(unittest.TestCase):
         self.assertIsNone(why)
         self.assertEqual(self.m.pid_started(os.getpid()), lease.get('pid_started'))
 
+    def test_adopted_identity_and_legacy_pids(self):
+        m = self.m
+        pid = 123456
+        procs = {os.getpid(): (0, 'python.exe', ''), pid: (0, 'blender.exe', ''),
+                 pid + 1: (pid, 'blender.exe', '')}
+        lease = dict(id='L1', pid=0, pids=[pid])  # old ledger, no identity
+        m.write_json('active', 'L1', lease)
+        with mock.patch.object(m, 'pid_started', return_value=101):
+            self.assertEqual([pid], [x['pid'] for x in m.scan_seen(procs, [lease])])
+            adopted = m.adopt('L1', pid)
+            self.assertEqual(101, adopted['adopted_started'][str(pid)])
+            self.assertEqual([], m.scan_seen(procs, [adopted]))
+        with mock.patch.object(m, 'pid_started', return_value=102):
+            self.assertEqual([pid], [x['pid'] for x in m.scan_seen(procs, [adopted])])
+        with mock.patch.object(m, 'pid_started', return_value=None):
+            self.assertEqual([pid], [x['pid'] for x in m.scan_seen(procs, [adopted])])
+            with self.assertRaises(m.TelemetryError):
+                m.adopt('L1', pid)
+        self.assertEqual(101, m.find_active('L1')['adopted_started'][str(pid)])
+
     def test_run_passes_lease_id_and_reports_unstartable_command(self):
         a = self.args()
         seen = {}

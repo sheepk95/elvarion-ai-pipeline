@@ -16,6 +16,10 @@ asker  <--ask_librarian.py-- the answer (PICKS / MAYBE / ALSO GREP / NOTE)
 If the librarian is not live, `ask_librarian.py` says so at once (exit 3) and the asker greps `INDEX.md` instead, so a
 missing librarian never blocks work.
 
+Catalogue descriptions support scalar and folded/literal block metadata without PyYAML. The standard-library
+fallback uses the same parser as the index builder and includes `when_to_use` text. Updating from v0.1.2 refreshes
+the catalogue format on the next `catalogue-check`, so previously shortened descriptions are rebuilt.
+
 ## Files
 
 | File | What it does |

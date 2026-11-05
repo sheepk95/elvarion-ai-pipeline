@@ -1,7 +1,29 @@
-import json, os, pathlib, subprocess, sys, tempfile, unittest
+import importlib.util, json, os, pathlib, subprocess, sys, tempfile, unittest
 
 SCRIPT = pathlib.Path(os.environ.get('SEND_TARGET', pathlib.Path(__file__).with_name('send_item.py'))).resolve()
 class SendItem(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'Windows identity')
+    def test_waiter_identity_messages(self):
+        spec = importlib.util.spec_from_file_location('wi', pathlib.Path(__file__).with_name('waiter_identity.py'))
+        wi = importlib.util.module_from_spec(spec); spec.loader.exec_module(wi)
+        state, born = wi.creation(os.getpid())
+        self.assertEqual('LIVE', state)
+        with tempfile.TemporaryDirectory() as t:
+            inbox = pathlib.Path(t)
+            (inbox / '.waiter.pid').write_text(str(os.getpid()))
+            def send():
+                return subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), '--to', str(inbox),
+                                       '--from', 'Builder', '--kind', 'Q', '--body', 'hi'],
+                                      capture_output=True, text=True, timeout=15)
+            p = send()
+            self.assertEqual(0, p.returncode, p.stderr); self.assertIn('WAITER STATUS UNKNOWN', p.stdout)
+            (inbox / '.waiter.identity').write_text(json.dumps({'pid': os.getpid(), 'creation': born}))
+            p = send()
+            self.assertEqual(0, p.returncode, p.stderr); self.assertNotIn('WAITER ', p.stdout)
+            (inbox / '.waiter.identity').write_text(json.dumps({'pid': os.getpid(), 'creation': born - 1}))
+            p = send()
+            self.assertEqual(0, p.returncode, p.stderr); self.assertIn('WAITER DEAD', p.stdout)
+
     def test_collision_keeps_every_complete_item(self):
         with tempfile.TemporaryDirectory() as t:
             root=pathlib.Path(t); inbox=root/'inbox'; inbox.mkdir(); barrier=root/'barrier'; barrier.mkdir()

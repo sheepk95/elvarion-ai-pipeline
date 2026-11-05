@@ -3,6 +3,7 @@
 Run: python -I -B pipeline/tools/test_switch_census.py   (Windows; the census itself is Windows-only)
 """
 import os, pathlib, shutil, subprocess, sys, tempfile, unittest
+import importlib.util, json, time
 
 SCRIPT = pathlib.Path(os.environ.get('CENSUS_TARGET', pathlib.Path(__file__).with_name('switch_census.py'))).resolve()
 
@@ -15,6 +16,7 @@ class Census(unittest.TestCase):
         (self.root / 'tools').mkdir(parents=True)
         (self.root / 'coordinator' / 'inbox').mkdir(parents=True)
         shutil.copy(SCRIPT, self.root / 'tools' / 'switch_census.py')
+        shutil.copy(pathlib.Path(__file__).with_name('waiter_identity.py'), self.root / 'tools' / 'waiter_identity.py')
         self.pair = self.t / 'la' / 'Claude-Data' / 'claude_x' / 'claude-code-sessions' / 'acct' / 'org'
         self.pair.mkdir(parents=True)
 
@@ -99,6 +101,77 @@ class Census(unittest.TestCase):
         p = self.run_census(None)
         self.assertEqual(0, p.returncode, p.stderr)
         self.assertIn('no single session root', p.stdout)
+
+    def test_unmatched_unread_is_nonzero(self):
+        inbox = self.root / 'coordinator' / 'inbox'
+        (inbox / '20260101T000000Z-builder-1.md').write_text('item')
+        p = self.run_census(None)
+        self.assertEqual(5, p.returncode, p.stdout + p.stderr)
+        self.assertIn('NO CHAT', p.stdout)
+        self.good_chat()
+        p = self.run_census(self.t / 'la')
+        self.assertEqual(4, p.returncode, p.stdout + p.stderr)
+        self.assertIn('WAKE', p.stdout)
+
+    def test_waiter_identity_and_reused_pid(self):
+        inbox = self.root / 'coordinator' / 'inbox'
+        self.good_chat()
+        waiter = subprocess.Popen([sys.executable, '-I', '-B', str(pathlib.Path(__file__).with_name('wait_inbox.py')),
+                                   str(inbox), '--timeout', '30'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not (inbox / '.waiter.identity').exists() and time.monotonic() < deadline:
+                time.sleep(.05)
+            identity = json.loads((inbox / '.waiter.identity').read_text())
+            p = self.run_census(self.t / 'la')
+            self.assertRegex(p.stdout, r'waiter ARMED')
+        finally:
+            waiter.terminate()
+            waiter.communicate(timeout=10)
+        # Keep the process alive while census reads the queued item; a real waiter
+        # would consume it on its next poll, making this test timing-dependent.
+        sleeper = subprocess.Popen([sys.executable, '-I', '-B', '-c', 'import time; time.sleep(30)'])
+        try:
+            spec = importlib.util.spec_from_file_location('wi_test', pathlib.Path(__file__).with_name('waiter_identity.py'))
+            wi = importlib.util.module_from_spec(spec); spec.loader.exec_module(wi)
+            state, born = wi.creation(sleeper.pid)
+            self.assertEqual('LIVE', state)
+            (inbox / '.waiter.pid').write_text(str(sleeper.pid))
+            identity = {'pid': sleeper.pid, 'creation': born}
+            # Same live Python PID but an earlier process creation: a stale registration.
+            identity['creation'] -= 1
+            (inbox / '.waiter.identity').write_text(json.dumps(identity))
+            (inbox / '20260101T000000Z-builder-1.md').write_text('item')
+            p = self.run_census(self.t / 'la')
+            self.assertEqual(4, p.returncode, p.stdout + p.stderr)
+            self.assertRegex(p.stdout, r'waiter DEAD')
+            self.assertIn('WAKE', p.stdout)
+            (inbox / '.waiter.identity').unlink()
+            p = self.run_census(self.t / 'la')
+            self.assertEqual(4, p.returncode, p.stdout + p.stderr)
+            self.assertRegex(p.stdout, r'waiter UNKNOWN')
+        finally:
+            sleeper.terminate()
+            sleeper.wait(timeout=10)
+
+    def test_armed_waiter_without_chat_is_unresolved(self):
+        inbox = self.root / 'coordinator' / 'inbox'
+        sleeper = subprocess.Popen([sys.executable, '-I', '-B', '-c', 'import time; time.sleep(30)'])
+        try:
+            spec = importlib.util.spec_from_file_location('wi_test', pathlib.Path(__file__).with_name('waiter_identity.py'))
+            wi = importlib.util.module_from_spec(spec); spec.loader.exec_module(wi)
+            state, born = wi.creation(sleeper.pid)
+            self.assertEqual('LIVE', state)
+            (inbox / '.waiter.pid').write_text(str(sleeper.pid))
+            (inbox / '.waiter.identity').write_text(json.dumps({'pid': sleeper.pid, 'creation': born}))
+            (inbox / '20260101T000000Z-builder-1.md').write_text('item')
+            p = self.run_census(None)
+            self.assertEqual(5, p.returncode, p.stdout + p.stderr)
+            self.assertIn('NO CHAT', p.stdout)
+            self.assertRegex(p.stdout, r'waiter ARMED\s+unread 1')
+        finally:
+            sleeper.terminate()
+            sleeper.wait(timeout=10)
 
     def test_session_root_without_chats(self):
         p = self.run_census(self.t / 'la')

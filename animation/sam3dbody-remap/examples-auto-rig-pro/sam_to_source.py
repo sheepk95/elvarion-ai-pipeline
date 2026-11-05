@@ -92,8 +92,10 @@ def main():
     names = list(mhr.character_torch.skeleton.joint_names)
     parents = dict(mhr.named_buffers())["character_torch.skeleton.joint_parents"].tolist()
     n_expr = dict(mhr.named_buffers())["face_expressions_model.shape_vectors"].shape[0]
-    files = sorted(glob.glob(os.path.join(a.run, "frames", "f*.npz")))
-    vf = [int(os.path.basename(f)[1:5]) for f in files]
+    files = glob.glob(os.path.join(a.run, "frames", "f*.npz"))
+    files = sorted((f for f in files if Path(f).stem[1:].isascii() and Path(f).stem[1:].isdigit()),
+                   key=lambda f: int(Path(f).stem[1:]))
+    vf = [int(Path(f).stem[1:]) for f in files]
     D = [np.load(f) for f in files]
     shape = np.median([d["p0_shape_params"] for d in D], 0)
     params = np.stack([d["p0_mhr_model_params"] for d in D])  # (T, 204): 136 pose + 68 scales
