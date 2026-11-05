@@ -1,0 +1,10 @@
+{
+  "title": "Desk Chat",
+  "session_id": "<SESSION_ID_OF_THE_DESK_CHAT>",
+  "cwd": "<PROJECT_ROOT>",
+  "updates_dir": "<DESK_ROOT>/updates",
+  "queue": "<DESK_ROOT>/QUEUE.md",
+  "updated_at": "<UTC timestamp, e.g. 2026-01-01T00:00:00Z>",
+  "updated_by": "<who wrote this file and why, e.g. the desk chat itself after taking over the desk>",
+  "note": "Lane chats read this before every desk message. Questions go to session_id by message AND as a line in updates_dir/<your session id>.md; loop updates go in that file only (format: updates_dir/README.md). Answers are logged in queue. The desk chat keeps its session id; only a new desk chat that the owner orders rewrites session_id and updated_at here. Pipeline chats send Q items to their Coordinator; only the Coordinator sends [DESK Q] here."
+}

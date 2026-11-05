@@ -1,0 +1,7 @@
+Elvarion AI pipeline
+Copyright 2026 the Elvarion developer
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It contains no third-party code. Projects it links to or works with (GBrain, SAM 3D Body, Auto-Rig Pro, Claude Code,
+gitleaks and others) are listed in THIRD-PARTY.md and stay under their own licences.

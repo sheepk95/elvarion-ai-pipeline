@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+checkpoints/
+*.ckpt
+*.pt
+desk/tools/state/
+librarian/mailbox/
+librarian/catalogue/
+**/__pycache__/
