@@ -88,6 +88,7 @@ STUCK_CLAIM_S = 60  # a claim this old whose request never left requests/ is fin
 ROLLOVER_REQUESTS = 50  # retired: no longer used by any code; kept so older notes still resolve
 ROLLOVER_COMPACTIONS = 10  # a fresh librarian after every 10 compactions
 LOCK_OFS = 1 << 30  # byte offset locked in a lock file (past any content; Windows allows locks beyond EOF)
+HEARTBEAT_LOCK_S = 15.0
 # a delta is used while it names at most this many entries AND is at most this fraction of the catalogue's
 # bytes (and never over one part's cap, so it fits one Read); a bigger change lists the changed parts instead
 DELTA_MAX_ENTRIES = 40
@@ -219,12 +220,12 @@ def write_heartbeat(mb, loaded=None, add_answered=0, rollover=None, event=None, 
     count."""
     os.makedirs(mb, exist_ok=True)
     lk = OsLock(os.path.join(mb, "heartbeat.lock"))
-    got = lk.acquire(timeout=15.0)  # never block work: after 15 s write anyway (unlocked) rather than hang
+    if not lk.acquire(timeout=HEARTBEAT_LOCK_S):
+        raise TimeoutError('heartbeat lock busy; retry the command (no heartbeat update was written)')
     try:
         return _write_heartbeat(mb, loaded, add_answered, rollover, event, fresh_start, compacted)
     finally:
-        if got:
-            lk.release()
+        lk.release()
 
 
 def _write_heartbeat(mb, loaded, add_answered, rollover, event, fresh_start, compacted=False):
@@ -415,12 +416,13 @@ def ids_in(mb, sub):
 
 def pending(mb):
     """Request ids still to claim. A request whose claim exists but whose move never finished is
-    NOT pending while the claim is under STUCK_CLAIM_S old (its claimer is still moving it), and never again once a
-    sweep was tried (claimed/<id>.sweep), so a stuck claim can no longer wake the librarian forever.
+    NOT pending while the claim or last sweep is under STUCK_CLAIM_S old. Failed sweeps retry after that
+    backoff; an OS lock serializes each request's claim and move, including recovery after a crash.
     Only file names that pass RID_RE count (ids_in)."""
     out = []
     for rid in ids_in(mb, "requests"):
-        if claim_age(mb, rid, ".sweep") is not None:
+        sweep_age = claim_age(mb, rid, ".sweep")
+        if sweep_age is not None and sweep_age <= STUCK_CLAIM_S:
             continue
         age = claim_age(mb, rid)
         if age is not None and age <= STUCK_CLAIM_S:
@@ -499,40 +501,50 @@ def claim_all(mb):
     housekeep(mb)
     got = []
     for rid in pending(mb):
-        src = os.path.join(mb, "requests", rid + ".json")
-        dst = os.path.join(mb, "claimed", rid + ".json")
-        cp = os.path.join(mb, "claimed", rid + ".claim")
-        age = claim_age(mb, rid)
-        if age is not None:
-            # A claim exists. Re-check its age HERE: another lister may have claimed it after pending() ran,
-            # and that fresh claim is still being moved by its owner (seen in a race test:
-            # 7 claims for 5 requests). Only a claim older than STUCK_CLAIM_S is stale: its claimer died or gave up
-            # between claim and move. Exactly one sweeper (O_EXCL .sweep) finishes it, once.
-            if age <= STUCK_CLAIM_S:
-                continue
-            if not take_claim(mb, rid, "sweeper", ".sweep"):
-                continue
-            try:
-                with open(cp, encoding="utf-8", errors="replace") as f:
-                    who = f.read()
-            except OSError:
-                who = ""
-            if who.startswith("abandoned-by-requester"):
-                move_retry(src, os.path.join(mb, "done", rid + ".timeout.json"))
-                move_retry(cp, os.path.join(mb, "done", rid + ".timeout.claim"))
-                continue
-            if not move_retry(src, dst):
-                continue
-        else:
-            if not take_claim(mb, rid, "librarian"):
-                continue  # another lister (or the requester abandoning it) holds it
-            if not move_retry(src, dst):
-                continue
-        d = read_json(dst) or {"brief": "(unreadable request file)", "from": "?"}
-        d["id"] = rid  # the id (and so answer_file) always comes from the file name, never the file's text
-        d["_claimed_now"] = True
-        got.append(d)
+        lock = OsLock(os.path.join(mb, 'claimed', rid + '.lock'))
+        if not lock.acquire():
+            continue
+        try:
+            item = claim_one(mb, rid)
+            if item is not None:
+                got.append(item)
+        finally:
+            lock.release()
     return got
+
+
+def claim_one(mb, rid):
+    """Move one request while its OS lock is held; persistent locks are never renamed or removed."""
+    if rid not in pending(mb):
+        return None  # another process moved it or refreshed the backoff before we acquired the lock
+    src = os.path.join(mb, "requests", rid + ".json")
+    dst = os.path.join(mb, "claimed", rid + ".json")
+    cp = os.path.join(mb, "claimed", rid + ".claim")
+    age = claim_age(mb, rid)
+    if age is not None:
+        # The timestamp is a retry backoff, not a permanent claim. An interrupted sweeper
+        # releases the OS lock automatically and its request becomes eligible again.
+        with open(os.path.join(mb, 'claimed', rid + '.sweep'), 'w', encoding='utf-8') as f:
+            f.write('sweeper %s pid %d\n' % (utc(), os.getpid()))
+        try:
+            with open(cp, encoding='utf-8', errors='replace') as f:
+                who = f.read()
+        except OSError:
+            who = ''
+        if who.startswith('abandoned-by-requester'):
+            if move_retry(src, os.path.join(mb, 'done', rid + '.timeout.json')):
+                move_retry(cp, os.path.join(mb, 'done', rid + '.timeout.claim'))
+            return None
+    elif not take_claim(mb, rid, 'librarian'):
+        return None
+    if not move_retry(src, dst):
+        print('WARNING request %s could not be moved; retry after %d seconds' % (rid, STUCK_CLAIM_S),
+              file=sys.stderr, flush=True)
+        return None
+    d = read_json(dst) or {'brief': '(unreadable request file)', 'from': '?'}
+    d['id'] = rid
+    d['_claimed_now'] = True
+    return d
 
 
 def unanswered_claimed(mb):
@@ -1199,4 +1211,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except TimeoutError as exc:
+        print('MAILBOX BUSY: %s' % exc, file=sys.stderr)
+        sys.exit(1)

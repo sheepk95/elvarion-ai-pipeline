@@ -16,15 +16,16 @@ by eye: if you change the checklist's numbering, change LOOK to match.
 What it checks (each problem prints one CHECK_REVIEW line):
   1. Every numbered item of the master checklist is in the copy, and none is left blank `[ ]` (section 11 may stay
      blank until the person passes the clip: `--final yes` then requires it). Section 10's questions: every box filled.
-  2. A box is `[x]`, `[!]` or `[-]`. `[-]` needs a reason (3+ words). `[!]` needs video frames (f12, f30-48).
+  2. A box is `[x]`, `[!]` or `[-]`. `[-]` needs a separate indented `reason:` line (3+ words). `[!]` needs video frames (f12, f30-48).
   3. LOOK items (judged by eye: LOOK below) that are `[x]` or `[!]` carry at least one proof line:
          see: <picture path> f<frames>: <what the picture shows at those frames>
-     The picture is a .png/.jpg/.jpeg/.webp/.gif that exists (absolute, or relative to the copy's folder), newer than
+     Quote paths with spaces in backticks, single or double quotes. The picture is a .png/.jpg/.jpeg/.webp/.gif that exists (absolute, or relative to the copy's folder), newer than
      `--blend` when given; the description has `--min-words` words or more and is not pasted on 3+ items.
   4. Proof of the look: each named picture was opened with the Read tool in the agent's own transcript (or one of its
      subagents'). `--transcript auto` finds the session(s) whose tool calls name the copy's path, under
      CLAUDE_PROJECTS_DIR/*/; pass the file(s) yourself if auto finds none. A Codex agent passes its own session file
-     (<USER_HOME>/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl): a picture opened there with view_image counts.
+     (<USER_HOME>/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl): a literal path in a supported view_image call counts. Unknown exec syntax receives no credit.
+     This records the call, not whether it succeeded or the image was actually observed.
   5. At least `--min-pictures` (4) different pictures across the look items, and with `--sheets <dir>[,<dir>]`
      EVERY picture in those folders opened (frame by frame, every angle: pass each sheet folder).
 Ends `CHECK_REVIEW VERDICT PASS|FAIL`; exit 1 on FAIL, 2 on a usage error. Reads only; writes nothing.
@@ -38,8 +39,8 @@ MASTER = os.environ.get("REVIEW_CHECKLIST", os.path.join(HERE, "REVIEW-CHECKLIST
 PROJECTS = os.environ.get("CLAUDE_PROJECTS_DIR", os.path.join(os.path.expanduser("~"), ".claude", "projects"))
 PIC = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 BOX = re.compile(r"^\s*-\s*\[(.)\]\s*(?:\*\*)?\s*(\d+\.\d+[a-z]?)?")
-SEE = re.compile(r"see:\s*`?([^`\s]+?\.(?:png|jpe?g|webp|gif))`?\s+(f\d+(?:\s*-\s*\d+)?(?:\s*,\s*f?\d+(?:\s*-\s*\d+)?)*)\s*:\s*(.+)",
-                 re.I)
+SEE = re.compile(r"see:\s*(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|([^\s`\"']+))\s+(f\d+(?:\s*-\s*\d+)?(?:\s*,\s*f?\d+(?:\s*-\s*\d+)?)*)\s*:\s*(.+)", re.I)
+REASON = re.compile(r"^[ \t]*reason:[ \t]*([^\r\n]+)$", re.I | re.M)
 FRAMES = re.compile(r"\bf\d+", re.I)
 
 
@@ -120,20 +121,40 @@ def find_transcripts(copy):
     return found
 
 
-CODEX_PIC = re.compile(r"[A-Za-z]:[\\/][^\"'`\s,;)]+?\.(?:png|jpe?g|webp|gif)", re.I)
+# Deliberately recognize only a complete, simple functions.exec program. Do not scan
+# arbitrary JavaScript: a path in a print, comment, string or unexecuted branch is not a look.
+JS_VIEW = re.compile(r'^\s*(?:const|let)\s+(\w+)\s*=\s*await\s+tools\.view_image\(\s*\{\s*path\s*:\s*("(?:[^"\\]|\\.)*")\s*}\s*\)\s*;\s*image\(\s*\1\.image_url\s*\)\s*;?\s*$', re.S)
 
 
 def codex_views(rec):
-    """Pictures a Codex session opened with view_image (direct call, or inside an exec tool's code)."""
+    """Extract only literal path arguments from recognized tool-call forms; unknown code earns no credit."""
     if not isinstance(rec, dict):
         return []
     p = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
     if p.get("type") not in ("function_call", "custom_tool_call"):
         return []
-    text = p.get("arguments") or p.get("input") or ""
-    if not isinstance(text, str) or ("view_image" not in text and p.get("name") != "view_image"):
+    name = p.get("name", "")
+    raw = p.get("arguments") or p.get("input") or ""
+    if not isinstance(raw, str):
         return []
-    return [norm(m.replace("\\\\", "\\")) for m in CODEX_PIC.findall(text)]
+    path = None
+    if name in ("view_image", "functions.view_image"):
+        try:
+            args = json.loads(raw)
+            if isinstance(args, dict) and set(args) == {"path"}:
+                path = args["path"]
+        except ValueError:
+            pass
+    elif name in ("exec", "functions.exec"):
+        match = JS_VIEW.fullmatch(raw)
+        if match:
+            try:
+                path = json.loads(match.group(2))
+            except ValueError:
+                pass
+    if isinstance(path, str) and path.lower().endswith(PIC):
+        return [norm(path)]
+    return []
 
 
 def reads(files):
@@ -195,12 +216,9 @@ def main():
     q_got = [it for it in got if it[0] is None and it[3] == 10]
     if len(q_got) < q_master:
         P("MISSING", f"section 10: {len(q_got)} of {q_master} questions in the copy")
-    for it in q_got:
-        if it[1] == " ":
-            P("BLANK", f"section 10: unanswered: {it[2].strip()[:70]}")
-
     pics, descs = [], {}
-    for i, it in by_id.items():
+    checked = list(by_id.items()) + [(f"section 10 question {n}", it) for n, it in enumerate(q_got, 1)]
+    for i, it in checked:
         _, mark, block, sec = it
         if mark == " ":
             if sec == 11 and opt["--final"] == "no":
@@ -212,7 +230,8 @@ def main():
             continue
         body = re.sub(r"^\s*-\s*\[.\]\s*", "", block, count=1)
         if mark == "-":
-            if len(re.findall(r"[A-Za-z]{2,}", body.split(i, 1)[-1])) < 3:
+            reason = REASON.search(block)
+            if not reason or len(re.findall(r"[A-Za-z]{2,}", reason.group(1))) < 3:
                 P("REASON", f"{i}: `[-]` needs a reason (why it does not apply)")
             continue
         if mark == "!" and not FRAMES.search(body):
@@ -223,7 +242,11 @@ def main():
         if not sees:
             P("NO_LOOK", f"{i}: a look item needs `see: <picture> f<frames>: <what it shows>` (a number is not a look)")
             continue
-        for path, frames, what in sees:
+        for quoted, double_quoted, single_quoted, bare, frames, what in sees:
+            path = quoted or double_quoted or single_quoted or bare
+            if not path.lower().endswith(PIC):
+                P("NO_PICTURE", f"{i}: {path} is not a supported picture path")
+                continue
             full = path if os.path.isabs(path.replace("\\", "/")) else os.path.join(here, path)
             n = norm(full)
             if not os.path.isfile(n):

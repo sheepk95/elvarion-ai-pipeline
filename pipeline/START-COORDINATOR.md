@@ -24,5 +24,5 @@ Before you start it:
 Copy `pipeline/tools/` from this repo into the pipeline root as `tools/`. `switch_census.py` and `job_pins.py` take the
 parent of `tools/` as the root by default and have `--root` overrides. `send_item.py` has no `--root`: a relative
 `--to` is relative to the parent of `tools/`, so use an absolute inbox path when targeting another root.
-`wait_inbox.py` takes the inbox path. `switch_census.py` discovers Claude desktop session files, not CLI sessions.
+`wait_inbox.py` takes the inbox path. `switch_census.py` discovers Claude desktop session files, not CLI sessions; it requires `--account-pairs <map.json>` mapping the current `CLAUDE_CODE_USER_EMAIL` to its relative account pair path (see `tools/README.md`).
 Each script prints its usage with `--help`.

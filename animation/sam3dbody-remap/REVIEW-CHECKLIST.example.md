@@ -11,6 +11,8 @@ How to fill a box (the gate enforces it):
   `see: <picture path> f<frames>: <what the picture shows at those frames>`
   and the picture must have been opened by you (the gate reads your transcript). A number is not a look.
 
+Use a separate indented `reason: why this does not apply` line for each `[-]` item. Quote paths containing spaces with backticks, single or double quotes.
+
 ## 1. Setup (numbers)
 - [ ] **1.1** The take, the SAM run folder and the blend reviewed are named at the top of this copy, with their dates.
 - [ ] **1.2** `run.json` says frames_done equals the number of frames you meant to run; no frame was skipped for "no box".

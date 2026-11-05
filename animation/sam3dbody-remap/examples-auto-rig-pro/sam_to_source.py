@@ -10,7 +10,7 @@ Example code: it feeds build_source_blender.py (needs Blender and your own rig, 
    rotations and root positions, all in BLENDER axes (X right in the picture, Y away from the camera, Z up), metres.
 
 Environment: SAM3DB_CKPT_DIR = the checkpoint folder holding assets/mhr_model.pt (default ./checkpoints/sam-3d-body-vith
-beside this script). Run it with the SAM venv's python (torch, roma, numpy).
+beside the parent kit scripts). Run it with the SAM venv's python (torch, roma, numpy).
 Frames: SAM frame files fNNNN are video frames; Blender frame = video frame + 1 at 24 fps.
 MHR facts (read from Meta's source): pred_joint_coords are camera axes = MHR axes with y, z negated; the joint
 rotations are in MHR axes (y up, z toward the camera) and NOT negated; MHR returns centimetres.
@@ -29,7 +29,7 @@ import numpy as np
 import torch
 
 HERE = Path(__file__).resolve().parent
-CKPT = Path(os.environ.get("SAM3DB_CKPT_DIR", str(HERE / "checkpoints" / "sam-3d-body-vith")))
+CKPT = Path(os.environ.get("SAM3DB_CKPT_DIR", str(HERE.parent / "checkpoints" / "sam-3d-body-vith")))
 MHR_PT = CKPT / "assets" / "mhr_model.pt"
 BODY = ["root", "c_spine0", "c_spine1", "c_spine2", "c_spine3", "c_neck", "c_head",
         "l_clavicle", "l_uparm", "l_lowarm", "l_wrist", "r_clavicle", "r_uparm", "r_lowarm", "r_wrist",

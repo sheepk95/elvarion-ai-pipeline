@@ -127,6 +127,47 @@ for tag, bad in (('r3', '{"local_a.md": 12,'), ('r3list', '[1, 2]'), ('r3val', '
           '0 new [DESK Q], 0 new [DESK UPDATE]' in out and err == ''
           and len([n for n in os.listdir(os.path.dirname(offs)) if '.corrupt-' in n]) == 1, '%r %r' % (out, err))
 
+# A closed output pipe must not acknowledge the question.
+root, elv = make_env('closed-pipe')
+write_lane(root, 'local_a.md', '[DESK Q] unread after broken pipe\n')
+rfd, wfd = os.pipe()
+os.close(rfd)
+with os.fdopen(wfd, 'wb') as output:
+    proc = subprocess.run([sys.executable, '-B', '-I', os.path.join(TOOLS, 'desk_read.py'), '--root', root],
+                          stdout=output, stderr=subprocess.PIPE, timeout=20)
+check('closed stdout fails', proc.returncode != 0)
+code, out, err = run('desk_read.py', root)
+check('closed stdout leaves question unread', code == 0 and 'unread after broken pipe' in out, out + err)
+code, out, err = run('desk_read.py', root)
+check('successful output advances offsets', code == 0 and '0 new [DESK Q]' in out, out + err)
+
+# Same PID but different creation FILETIME is a different recovery episode.
+import importlib.util
+sys.path.insert(0, TOOLS)
+spec = importlib.util.spec_from_file_location('watch_regression', os.path.join(TOOLS, 'desk_watch.py'))
+watchmod = importlib.util.module_from_spec(spec); spec.loader.exec_module(watchmod)
+inbox = os.path.join(TMP, 'identity-inbox'); os.makedirs(inbox)
+with open(os.path.join(inbox, '.waiter.pid'), 'w') as f: f.write('1234')
+watchmod.pipeline_waiter_status = lambda *args: 'DEAD'
+keys = []
+for creation in (111, 222):
+    with open(os.path.join(inbox, '.waiter.identity'), 'w') as f: json.dump({'pid': 1234, 'creation': creation}, f)
+    keys.append(watchmod.waiter_state(inbox, time.time())[2])
+check('reused PID has separate recovery keys', keys[0] != keys[1], repr(keys))
+check('closed previous recovery key does not close new episode',
+      not watchmod.key_closed('ok ' + keys[0] + ' 2026-01-01T00:00:00Z', keys[1]), repr(keys))
+
+# Unknown creation time: each newly registered process has a stable generation nonce.
+keys = []
+for generation in ('a' * 32, 'b' * 32):
+    with open(os.path.join(inbox, '.waiter.identity'), 'w') as f:
+        json.dump({'pid': 1234, 'creation': None, 'generation': generation}, f)
+    keys.append(watchmod.waiter_state(inbox, time.time())[2])
+check('unknown creation registrations have distinct keys', keys[0] != keys[1], repr(keys))
+check('closed unknown creation episode does not suppress next',
+      not watchmod.key_closed('ok ' + keys[0] + ' 2026-01-01T00:00:00Z', keys[1]), repr(keys))
+check('unknown registration key stable within episode', watchmod.waiter_state(inbox, time.time())[2] == keys[1])
+
 shutil.rmtree(TMP, ignore_errors=True)
 print('RESULT', 'FAIL' if fails else 'PASS', len(fails), 'failures')
 sys.exit(1 if fails else 0)

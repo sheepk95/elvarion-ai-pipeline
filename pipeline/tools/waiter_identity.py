@@ -6,7 +6,37 @@ or unreadable identity is UNKNOWN: legacy waiters must be re-armed to identify t
 import json
 import os
 import tempfile
+import time
+import uuid
+from contextlib import contextmanager
 
+
+
+@contextmanager
+def registration_lock(inbox):
+    """Serialize cooperating registrations and cleanup across processes. Keep the lock file."""
+    path = os.path.join(inbox, ".waiter.lock")
+    with open(path, "a+b") as f:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(.05)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 def creation(pid):
     """Return (state, creation FILETIME). Permission/API failures are unknown."""
@@ -40,9 +70,7 @@ def creation(pid):
 def register(inbox):
     pid = os.getpid()
     state, born = creation(pid)
-    if state != "LIVE":
-        return None
-    record = {"pid": pid, "creation": born}
+    record = {"pid": pid, "creation": born if state == "LIVE" else None, "generation": uuid.uuid4().hex}
     fd, tmp = tempfile.mkstemp(prefix=".waiter-identity-", dir=inbox)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
