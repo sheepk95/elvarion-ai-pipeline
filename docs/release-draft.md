@@ -1,5 +1,13 @@
 # Experimental release preparation
 
+**Status, 2026-11-05: applied.**
+- The repository is public, with its description and topics.
+- Secret scanning, push protection and private vulnerability reporting are on.
+- `main` requires the Windows checks.
+- v0.1.2 is tagged from the merge that adds this note.
+
+The plan below is kept as it was written.
+
 These are proposed owner actions after reviewing and integrating the fixes. This document does not change repository
 settings, create a tag or release, enable a service, or make the repository public.
 

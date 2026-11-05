@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.2 (unreleased): fixes from two independent reviews of v0.1.1
+## v0.1.2 (2026-11-05): fixes from two independent reviews of v0.1.1
 
 A Codex CLI review (GPT-6 Astra, extra-high) and a fresh Opus 5.5 review (extra-high) both rated v0.1.1 ready at
 7.5/10, with no blocker or major defects. This version fixes every minor defect and improvement they reported. Each
@@ -46,6 +46,10 @@ behaviour fix has a test that fails on v0.1.1 and passes here.
 - New guards for each item above, including mutants the reviewers showed were unguarded in v0.1.1 (first-pin-only
   scan, scoped header end anchor, queue-ticket start time, blank provenance). The wait-ticket cleanup test no longer
   depends on timing.
+- The GPU-lease hardware self-test (`gpu-lease/scripts/selftest.py`) passed all 48 checks on an RTX 3090.
+
+### Repository
+- New SECURITY.md: report a vulnerability privately through the Security tab.
 
 ## v0.1.1: reliability fixes from three independent reviews
 
