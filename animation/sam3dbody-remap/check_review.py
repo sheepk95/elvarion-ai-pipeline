@@ -83,12 +83,12 @@ def active_lines(text):
     in_comment, fence = False, None
     for raw in text.splitlines():
         if fence:
-            if re.match(r'^ {0,3}' + re.escape(fence[0]) + '{' + str(fence[1]) + r',}\s*$', raw):
+            if re.match(r'^[ \t]*' + re.escape(fence[0]) + '{' + str(fence[1]) + r',}\s*$', raw):
                 fence = None
             yield None
             continue
         if not in_comment:
-            opening = re.match(r'^ {0,3}(`{3,}|~{3,})', raw)
+            opening = re.match(r'^[ \t]*(`{3,}|~{3,})', raw)
             if opening:
                 fence = (opening.group(1)[0], len(opening.group(1)))
                 yield None
@@ -126,14 +126,14 @@ def has_html(text):
         if line is None:
             continue
         line = re.sub(r'(`+)(?!`)(.*?)(?<!`)\1(?!`)', '', line)
-        if re.search(r'<\s*/?\s*[A-Za-z][A-Za-z0-9-]*(?=[\s/>]|$)', line):
+        if re.search(r'<\s*(?:[!?]|/?\s*[A-Za-z][A-Za-z0-9-]*(?=[\s/>]|$))', line):
             return True
     return False
 
 
 def items(text):
     """Parse the documented checklist subset, excluding HTML comments and fenced or indented code boxes."""
-    out, cur, sec = [], None, None
+    out, cur, sec, box_indent = [], None, None, 0
     for line in active_lines(text):
         if line is None:
             cur = None
@@ -146,8 +146,9 @@ def items(text):
         m = BOX.match(line)
         if m:
             cur = [m.group(2), m.group(1), line, sec]
+            box_indent = len(line) - len(line.lstrip(' '))
             out.append(cur)
-        elif cur is not None and (line.startswith((" ", "\t")) and line.strip()):
+        elif cur is not None and re.match(r'^ {' + str(box_indent + 2) + ',' + str(box_indent + 3) + r'}\S', line):
             cur[2] += "\n" + line
         elif cur is not None and not line.strip():
             continue

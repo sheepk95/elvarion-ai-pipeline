@@ -148,6 +148,44 @@ class ReviewGateTests(unittest.TestCase):
         self.assertEqual(1, result.returncode, result.stdout)
         self.assertIn('HTML', result.stdout)
 
+    def test_nested_code_evidence_does_not_count(self):
+        text, transcript = self.shipped_fixture()
+        reason = '  reason: not applicable to this clip'
+        picture = '  see: frame0.png f1: distinct body pose visible number aa'
+        for original, code in ((reason, 'REASON 1.1'), (picture, 'NO_LOOK 2.2')):
+            for replacement in ('    ```\n    ' + original.strip() + '\n    ```',
+                                '      ' + original.strip()):
+                with self.subTest(evidence=code, replacement=replacement):
+                    self.copy.write_text(text.replace(original, replacement, 1), encoding='utf-8')
+                    result = self.run_gate('--transcript', str(transcript))
+                    self.assertEqual(1, result.returncode, result.stdout)
+                    self.assertIn(code, result.stdout)
+
+    def test_indented_box_and_relative_evidence(self):
+        text, transcript = self.shipped_fixture()
+        line = next(line for line in text.splitlines() if line.startswith('- [-] **1.1**'))
+        original = line + '\n  reason: not applicable to this clip'
+        indented = '   ' + line + '\n     reason: not applicable to this clip'
+        self.copy.write_text(text.replace(original, indented), encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(0, result.returncode, result.stdout)
+        fenced = '   ' + line + '\n     ```\n     reason: not applicable to this clip\n     ```'
+        self.copy.write_text(text.replace(original, fenced), encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn('REASON 1.1', result.stdout)
+
+    def test_html_declarations_are_refused(self):
+        text, transcript = self.shipped_fixture()
+        line = next(line for line in text.splitlines() if line.startswith('- [-] **1.1**'))
+        block = line + '\n  reason: not applicable to this clip'
+        for opening, closing in (('<![CDATA[', ']]>'), ('<!DOCTYPE html [', ']>'), ('<?hidden', '?>')):
+            with self.subTest(opening=opening):
+                self.copy.write_text(text.replace(block, opening + '\n' + block + '\n' + closing), encoding='utf-8')
+                result = self.run_gate('--transcript', str(transcript))
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn('HTML', result.stdout)
+
     def test_all_not_applicable_is_not_a_visual_review(self):
         self.copy.write_text('## 2. Body\n- [-] 2.2 body\n  reason: not applicable to clip\n- [-] 3.1 pose\n  reason: not applicable to clip\n', encoding='utf-8')
         result = self.run_gate()

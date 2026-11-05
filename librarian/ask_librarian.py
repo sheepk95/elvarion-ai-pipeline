@@ -237,7 +237,7 @@ def host_session():
     return h if HOST_RE.match(h) else None
 
 
-def submit(mb, brief, frm="unknown", kind="ask", timeout=None, have=None):
+def submit(mb, brief, frm="unknown", kind="ask", timeout=None, have=None, before_publish=None):
     LI.ensure(mb)
     rid = make_id()
     brief, trunc = cap_brief(brief)
@@ -247,6 +247,8 @@ def submit(mb, brief, frm="unknown", kind="ask", timeout=None, have=None):
     if have:
         d["have"] = list(have)[:LI.HAVE_MAX]
     p = os.path.join(mb, "requests", rid + ".json")
+    if before_publish:
+        before_publish(rid)
     LI.write_json_atomic(p, d)  # tmp file + os.replace: the watcher never sees half a request
     return rid, trunc
 
@@ -309,6 +311,20 @@ def find_answer(mb, rid):
     for p in (os.path.join(mb, "done", rid + ".md"), os.path.join(mb, "done", rid + ".uncollected.md")):
         try:
             with open(p, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if ends_with_marker(text):
+            return text
+    return None
+
+
+def peek_answer(mb, rid):
+    """Preview without moving the answer away from a requester waiting in answers/."""
+    for directory, name in (("answers", rid + ".md"), ("done", rid + ".md"),
+                            ("done", rid + ".uncollected.md")):
+        try:
+            with open(os.path.join(mb, directory, name), encoding="utf-8") as f:
                 text = f.read()
         except OSError:
             continue
@@ -382,7 +398,7 @@ def unread_late(mb, me, with_ids=False):
         rid = os.path.basename(p)[:-5]
         if d.get("reply_to") != me:
             continue
-        text = find_answer(mb, rid)
+        text = peek_answer(mb, rid)
         if text is not None and not os.path.exists(shown_path(mb, rid)):
             text, _ = drop_held(text, d.get("have"))  # merge: held skills are stripped on the late path too
             block = late_block(rid, d, text, own=False)
@@ -444,7 +460,7 @@ def wait_late(mb, rid, wait, poll=2.0, deliver=False):
                 if os.path.exists(shown_path(mb, rid)) or os.path.isfile(seen):
                     return 0, "LIBRARIAN_LATE: answer %s was already shown (on another ask from this chat)." % rid
                 return 2, "LIBRARIAN_LATE: no late request %s in %s" % (rid, mb)
-            text = find_answer(mb, rid)
+            text = find_answer(mb, rid) if deliver else peek_answer(mb, rid)
             if text is not None:
                 text, _ = drop_held(text, d.get("have"))
                 text = late_block(rid, d, text)
@@ -487,7 +503,7 @@ def ask(mb, brief, frm="unknown", timeout=DEFAULT_TIMEOUT, poll=0.5, have=None):
     return code, text, info
 
 
-def _ask(mb, brief, frm, timeout, poll, have=None):
+def _ask(mb, brief, frm, timeout, poll, have=None, before_publish=None):
     prob = LI.heartbeat_problem(mb)
     asleep = LI.librarian_asleep(mb)
     if prob and not prob.startswith(LIVE_PROBLEMS):
@@ -495,7 +511,7 @@ def _ask(mb, brief, frm, timeout, poll, have=None):
         # would answer soon, so file nothing: a librarian started later must not inherit a backlog of dead asks.
         return 3, FALLBACK % prob + (wake_hint(mb, asleep) if asleep else ""), {"reason": prob, "asleep": bool(asleep)}
     t0 = time.time()
-    rid, trunc = submit(mb, brief, frm, "ask", timeout, have)
+    rid, trunc = submit(mb, brief, frm, "ask", timeout, have, before_publish)
     if not prob and asleep:
         prob = "librarian asleep"  # nobody would answer within the wait: file it, fall back now, ask for the wake
     waited = False
@@ -512,7 +528,8 @@ def _ask(mb, brief, frm, timeout, poll, have=None):
         prob = "no answer in %ds" % timeout
         LI.mark_timeout(mb, rid)  # later asks fall back at once (still filed for a late answer)
     # Live but busy, or this ask timed out: fall back now, but keep the request queued for a late answer.
-    mark_late(mb, rid, frm, prob, have)
+    if before_publish is None:
+        mark_late(mb, rid, frm, prob, have)
     me = os.path.abspath(__file__).replace("\\", "/")
     mbarg = "" if os.path.normcase(os.path.abspath(mb)) == os.path.normcase(os.path.abspath(LI.DEF_MAILBOX)) else \
         ' --mailbox "%s"' % mb.replace("\\", "/")
@@ -586,26 +603,33 @@ def main(argv=None):
     if len(have) > LI.HAVE_MAX:
         have_err += ("\nNOTE: you listed %d held skills; the librarian was sent the first %d, and all %d are stripped "
                      "from this answer here" % (len(have), LI.HAVE_MAX, len(have)))
+    reservation = {}
+    def prepare(rid):
+        lock = delivery_lock(mb, rid, timeout=30)
+        if lock is None:
+            raise TimeoutError("could not reserve answer delivery for " + rid)
+        reservation["lock"] = lock
+        reservation["id"] = rid
+        mark_late(mb, rid, a.frm, "answer awaiting output", have, required=True)
+    try:
+        return run_cli_ask(mb, a, brief, have, have_err, prepare, reservation)
+    finally:
+        if reservation.get("lock"):
+            reservation["lock"].release()
+
+
+def run_cli_ask(mb, a, brief, have, have_err, prepare, reservation):
     if not brief or not brief.strip():
         code, text, info = 2, "ask_librarian: refused an empty brief (say what the task is).", {"reason": "empty brief"}
     else:
-        code, text, info = _ask(mb, brief, a.frm, a.timeout, 0.5, have=have)
+        code, text, info = _ask(mb, brief, a.frm, a.timeout, 0.5, have=have, before_publish=prepare)
     own_id = info.get("id") if code == 0 else None
     me = host_session()
     if own_id:
-        lock = delivery_lock(mb, own_id, timeout=30)
-        if lock is None:
-            print("LIBRARIAN_LATE: answer %s is being delivered; retry later." % own_id)
-            return 3
-        try:
-            mark_late(mb, own_id, a.frm, "answer awaiting output", have, required=True)
-            deliver_unread(mb, me, own_id)
-            if os.path.exists(shown_path(mb, own_id)):
-                print("LIBRARIAN_LATE: answer %s was already shown." % own_id)
-            else:
-                output_late(mb, text + have_err, [own_id])
-        finally:
-            lock.release()
+        if reservation.get("id") != own_id:
+            raise RuntimeError("answer lacks its delivery reservation: " + own_id)
+        deliver_unread(mb, me, own_id)
+        output_late(mb, text + have_err, [own_id])
     else:
         if code != 2:
             deliver_unread(mb, me)

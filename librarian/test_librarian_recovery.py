@@ -79,8 +79,10 @@ class RecoveryTests(unittest.TestCase):
         for f in files:
             f.seek(0)
         outputs = [f.read() for f in files]
-        self.assertEqual([0, 3], [p.returncode for p in procs], errors)
+        self.assertIn(procs[0].returncode, (0, 3), errors)
+        self.assertEqual(3, procs[1].returncode, errors)
         self.assertEqual(1, sum(b'PICKS: unique-answer' in out for out in outputs))
+        self.assertTrue((self.mb / 'late' / 'seen' / (RID + '.shown')).exists())
 
     def test_read_apis_do_not_acknowledge_preview(self):
         self.late_fixture()
@@ -89,6 +91,21 @@ class RecoveryTests(unittest.TestCase):
         with patch.object(ask, 'host_session', return_value='local_01234567-0123-0123-0123-0123456789ab'):
             self.assertIn('unique-answer', ask.ask(str(self.mb), 'a task')[1])
         self.assertFalse((self.mb / 'late' / 'seen' / (RID + '.shown')).exists())
+
+    def test_unread_preview_does_not_collect_reserved_current_answer(self):
+        self.late_fixture()
+        done = self.mb / 'done' / (RID + '.md')
+        answer = self.mb / 'answers' / (RID + '.md')
+        done.rename(answer)
+        lock = ask.delivery_lock(str(self.mb), RID)
+        self.assertIsNotNone(lock)
+        try:
+            previews = ask.unread_late(str(self.mb), 'local_01234567-0123-0123-0123-0123456789ab')
+            self.assertIn('unique-answer', previews[0])
+            self.assertTrue(answer.exists(), 'preview must not move the current ask’s answer')
+            self.assertIn('unique-answer', ask.wait_answer(str(self.mb), RID, 0))
+        finally:
+            lock.release()
 
     def test_next_ask_delivers_and_acknowledges(self):
         self.late_fixture()
@@ -187,9 +204,12 @@ class RecoveryTests(unittest.TestCase):
         def interleaved(*args, **kwargs):
             real_mark(*args, **kwargs)
             attempted.append(ask.wait_late(str(self.mb), RID, 0, deliver=True))
+        def fake_ask(*args, **kwargs):
+            kwargs['before_publish'](RID)
+            return 0, 'ON TIME ANSWER', {'id': RID}
         import io
         output = io.StringIO()
-        with patch.object(ask, '_ask', return_value=(0, 'ON TIME ANSWER', {'id': RID})), \
+        with patch.object(ask, '_ask', side_effect=fake_ask), \
              patch.object(ask, 'mark_late', side_effect=interleaved), \
              patch.object(ask.sys, 'stdout', output):
             code = ask.main(['--mailbox', str(self.mb), '--no-finder', 'test'])
@@ -218,6 +238,50 @@ class RecoveryTests(unittest.TestCase):
                                capture_output=True, timeout=10)
         self.assertEqual(0, retry.returncode, retry.stdout)
         self.assertIn(b'ON TIME ANSWER', retry.stdout)
+
+    def test_preparation_failure_does_not_publish_request(self):
+        li.write_json_atomic(str(self.mb / 'heartbeat.json'), {'loaded': True, 'epoch': time.time()})
+        with patch.object(ask, 'mark_late', side_effect=PermissionError('preparation denied')):
+            with self.assertRaisesRegex(PermissionError, 'preparation denied'):
+                ask.main(['--mailbox', str(self.mb), '--timeout', '0', '--no-finder', 'test'])
+        self.assertEqual([], list((self.mb / 'requests').glob('*.json')))
+
+    def test_killed_after_collection_keeps_own_answer_recoverable(self):
+        li.write_json_atomic(str(self.mb / 'heartbeat.json'), {'loaded': True, 'epoch': time.time()})
+        env = dict(os.environ, CLAUDE_CODE_HOST_SESSION_ID='local_01234567-0123-0123-0123-0123456789ab')
+        script = ('import sys,time\nsys.path.insert(0, sys.argv[1])\nimport ask_librarian as a\n'
+                  'original=a.wait_answer\ndef paused(*args):\n result=original(*args)\n'
+                  ' open(sys.argv[3], "w").write("collected")\n time.sleep(30)\n return result\n'
+                  'a.wait_answer=paused\nsys.exit(a.main(["--mailbox",sys.argv[2],"--timeout","10",'
+                  '"--no-finder","test"]))\n')
+        signal = self.mb / 'collected.signal'
+        proc = subprocess.Popen([sys.executable, '-I', '-B', '-c', script, str(Path(__file__).parent),
+                                 str(self.mb), str(signal)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        def cleanup():
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate(timeout=5)
+        self.addCleanup(cleanup)
+        deadline = time.time() + 5
+        requests = []
+        while time.time() < deadline and not requests and proc.poll() is None:
+            requests = list((self.mb / 'requests').glob('*.json'))
+            time.sleep(0.02)
+        self.assertEqual(1, len(requests))
+        rid = requests[0].stem
+        (self.mb / 'answers' / (rid + '.md')).write_text('COLLECTED ANSWER\n' + li.END_MARKER)
+        while time.time() < deadline and not signal.exists():
+            time.sleep(0.02)
+        self.assertTrue(signal.exists())
+        self.assertTrue((self.mb / 'done' / (rid + '.md')).exists())
+        self.assertIsNone(proc.poll())  # paused between collection and output
+        proc.kill()
+        proc.communicate(timeout=5)
+        retry = subprocess.run([sys.executable, '-I', '-B', str(Path(__file__).with_name('ask_librarian.py')),
+                                '--mailbox', str(self.mb), '--late', rid, '--late-wait', '0'],
+                               capture_output=True, timeout=10)
+        self.assertEqual(0, retry.returncode, retry.stdout)
+        self.assertIn(b'COLLECTED ANSWER', retry.stdout)
 
     def test_failed_sweep_retries_after_backoff(self):
         self.stale_request()

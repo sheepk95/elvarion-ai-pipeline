@@ -8,9 +8,9 @@
   questions, and refuses duplicate item IDs. Hidden comments and code blocks do not count as checklist items.
   Keep prompts on their checkbox lines and add evidence underneath; see the documented Markdown subset.
 - Built-in librarian delivery uses per-request locks and flushes output before writing shown markers. Blocked
-  output cannot hold up unrelated requests, and acknowledgement failures are reported. On-time CLI answers are
-  also staged for late recovery before output. A broken pipe leaves the answer available for retry.
-  Python read APIs preview without acknowledging;
+  output cannot hold up unrelated requests, and acknowledgement failures are reported. CLI recovery is prepared
+  before requests are published, covering on-time answers as well. A broken pipe leaves the answer available for retry.
+  Late-answer preview helpers do not move or acknowledge answers;
   a crash between successful flush and acknowledgement can cause a duplicate, and the unshipped external finder
   hook remains outside this delivery guarantee.
 - Regression checks cover the original failures, valid checklist copies, competing delivery and progress while a

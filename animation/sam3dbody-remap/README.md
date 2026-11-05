@@ -143,9 +143,10 @@ use that master consistently for the copy and gate.
 The checker reads a limited Markdown subset, not a full Markdown renderer: numbered section headings must start
 with `## `; each complete prompt must be on its checkbox line, with at most three leading spaces. Boxes and headings
 inside HTML comments or backtick/tilde fenced code blocks do not count; boxes indented by four spaces or a tab do
-not count. Put evidence and reasons on separate indented lines beneath a live box, outside comments and fences.
+not count. Put evidence and reasons on separate lines beneath a live box, indented by exactly two or three spaces
+more than the box, outside comments and fences. Deeper indentation and tabs are not accepted for evidence.
 Use the same simple layout for a custom master and its copy; multiline prompts and nested lists are unsupported.
-Raw HTML-like tags in active text are refused, including tags with attributes split across lines. Single-line
+Raw HTML-like tags and declarations in active text are refused, including tags with attributes split across lines. Single-line
 inline code spans may contain angle-bracket placeholders. Lines combining backticks and HTML comment delimiters
 are refused even in fenced text, because their interpretation is ambiguous to this parser.
 
