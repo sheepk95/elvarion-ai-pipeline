@@ -25,6 +25,8 @@ All three are single lines appended to the lane's own file in `updates/`.
 [DESK Q] <title> | blocking: yes|no | <question> | Options: A ... / B ... | Recommended: <answer> because <one line> | Assumed and continuing: yes|no | Needs: <files, ids> | <session id>
 [DESK UPDATE] <title> loop N | <UTC> | <result in one line> | <absolute path to the full report>
 [DESK HANDOVER] <title> | old <session id> -> new <session id> | <UTC> | compactions at handover: N | <path to the handover file>
+[DESK HANDOVER] <title> | self-clear, same chat <session id> | <UTC> | <path to the handover file>
+[DESK UPDATE] <title> RESUMED | <UTC> | <what was recovered>
 ```
 
 - `[DESK Q]` is a question for the human. It wakes the desk chat.
@@ -90,6 +92,12 @@ in its desk file.
     warning.
 - **Exit 6:** a chat that announced a self-clear has not written a `RESUMED` line 15 minutes later. It reads only the
   desk files, so it works without a pipeline root.
+
+For exits 5 and 6, record the printed `key=<key>` in `<desk root>/recovery-sent.md` before sending a recovery message.
+Use `sending <key> <UTC>` while attempting delivery, then `ok <key> <UTC>` or `failed <key> <UTC>` when the attempt
+ends. Keep it append-only. The watcher suppresses duplicate alerts for recorded keys, with one stuck alert when a
+sent recovery has not produced activity after 15 minutes. This is delivery bookkeeping, not approval to resume
+paused work. Check the relevant chat's status and scope before any resume message.
 
 ## Tools and tests
 

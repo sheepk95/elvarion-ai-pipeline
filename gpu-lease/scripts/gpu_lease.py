@@ -19,7 +19,7 @@ State lives in the ledger folder (GPU_LEASE_DIR):
   queue/<id>.json     a waiting claim's place in line (removed when it opens or gives up)
   seen/<key>.json     a known GPU program running with no lease (auto-opened, auto-closed when it exits)
   ledger.jsonl        append-only log: open, renew, close, reap, refused, queued, yield-asked, seen-open, seen-close
-  .lock               a short mutex held only while the ledger changes
+  .lock               persistent kernel-locked mutex file; never delete or rename it while clients are running
 
 Admission:
   - BUDGET_GB (21.6 of 24 GB; 2.4 kept for the desktop and any always-on local model server) is shared by leases and by seen
@@ -37,7 +37,9 @@ Admission:
   - A flag left behind (expired, a dead pid, or written here for a lease that no longer exists) is moved aside, never
     honoured forever. Windows refuses a rename while a reader has the file open, so every move is retried for 3 s.
 
-Usage (exit 0 = ok, 3 = GPU busy, refused or no such lease, 2 = bad arguments, 1 = tool error):
+Usage (exit 0 = ok, 3 = GPU busy or refused, or no such lease for renew / adopt, 2 = bad arguments, 1 = tool error;
+release of an unknown or closed id is 0; run returns its command's own exit code, 127 when the command cannot start,
+and passes the booking id to it as GPU_LEASE_ID):
   python gpu_lease.py status [--json]
   python gpu_lease.py claim --who "<chat title>" --what "<job>" --gb 8 [--exclusive] [--yields] [--minutes 60]
                             [--pid 1234] [--wait 1800]
@@ -49,7 +51,9 @@ Usage (exit 0 = ok, 3 = GPU busy, refused or no such lease, 2 = bad arguments, 1
 """
 import argparse
 import ctypes
+import errno
 import json
+import math
 import os
 import re
 import subprocess
@@ -69,7 +73,9 @@ FREE_MARGIN_GB = 0.5  # nvidia-smi must show the lease's GB plus this much free
 MAX_MINUTES = 480  # every lease, with or without --pid, expires unless renewed within this
 HEARTBEAT_S = 60  # `run` renews every minute ...
 HEARTBEAT_LEASE_MIN = 5  # ... to five minutes ahead, so a killed wrapper's lease lapses within 5 min
-LOCK_STALE_S = 20.0
+# A claim holds the ledger lock for one telemetry sample: PowerShell (timeout 30 s) plus nvidia-smi (timeout 15 s).
+# Two claimants back to back can hold it for 90 s, so a waiting client must be able to outlast that.
+LOCK_WAIT_S = 120.0
 QUEUE_STALE_S = 120  # a queue ticket not refreshed for this long is dropped (its waiter died)
 LABEL = 'gpu_lease'  # line 2 of a UNITY_PRIORITY written here starts with this
 
@@ -85,6 +91,7 @@ SEEN_RULES = json.loads(os.environ.get('GPU_LEASE_SEEN_JSON') or 'null') or [
 ]
 TEST_HOLD_S = float(os.environ.get('GPU_LEASE_TEST_HOLD_S') or 0)
 RETRY_S = 3.0  # Windows refuses rename/replace/delete while another process has the file open: retry this long
+PROCESS_SCAN = os.name == 'nt'  # process enumeration (PowerShell/CIM) exists only on Windows
 
 
 def retry(fn, *args):
@@ -124,10 +131,45 @@ def stamp():
     return datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
 
 
-def pid_alive(pid):
-    """OpenProcess plus GetExitCodeProcess; never os.kill, which terminates the process on Windows."""
+def pid_started(pid):
+    """An opaque start-time stamp of process pid (Windows creation FILETIME; Linux /proc start ticks), or None.
+
+    Stored beside a pid so a reused pid (a new process given a dead one's number) does not keep a booking alive."""
+    if not pid:
+        return None
+    if os.name != 'nt':
+        try:
+            with open('/proc/%d/stat' % int(pid), 'rb') as f:
+                return int(f.read().rsplit(b')', 1)[1].split()[19])  # field 22, starttime
+        except (OSError, ValueError, IndexError):
+            return None  # no /proc (macOS) or gone: fall back to the pid check alone
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.OpenProcess.restype = ctypes.c_void_p
+    k32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+    k32.GetProcessTimes.argtypes = (ctypes.c_void_p,) + (ctypes.POINTER(ctypes.c_ulonglong),) * 4
+    k32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    handle = k32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        t = [ctypes.c_ulonglong() for _ in range(4)]
+        if not k32.GetProcessTimes(handle, *[ctypes.byref(x) for x in t]):
+            return None
+        return int(t[0].value)
+    finally:
+        k32.CloseHandle(handle)
+
+
+def pid_alive(pid, started=None):
+    """OpenProcess plus GetExitCodeProcess; never os.kill, which terminates the process on Windows.
+
+    With started (a pid_started() stamp recorded when the booking was made), a live process whose stamp differs is a
+    reused pid and counts as dead. A stamp that cannot be read now leaves the plain pid answer."""
     if not pid:
         return False
+    if started is not None and pid_alive(pid):
+        now_started = pid_started(pid)
+        return now_started is None or now_started == started
     if os.name != 'nt':
         try:
             os.kill(pid, 0)
@@ -153,55 +195,47 @@ def pid_alive(pid):
 
 # ---------- the mutex ----------
 class Lock:
-    """Exclusive create of ROOT/.lock; a lock older than LOCK_STALE_S or whose pid is dead is moved aside."""
+    """Kernel-owned lock on a persistent file; process death releases it. Never rename or unlink the file."""
 
     def __init__(self):
         self.path = ROOT / '.lock'
 
     def __enter__(self):
         ROOT.mkdir(parents=True, exist_ok=True)
-        end = now() + 60
-        next_look = now() + 1.0
-        while True:
-            # Stamped per attempt: the time must be when the lock was WON, or a lock won after a long wait looks stale.
-            self.token = '%d %f %s' % (os.getpid(), now(), uuid.uuid4().hex)
-            try:
-                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-                with os.fdopen(fd, 'w') as f:
-                    f.write(self.token + '\n')
-                return self
-            except (FileExistsError, PermissionError):  # PermissionError: the old lock is being renamed away
-                pass
-            # Reading the lock holds it open and blocks its owner's release (Windows), so look only once a second.
-            if now() >= next_look:
-                next_look = now() + 1.0
-                try:
-                    pid, t, _ = self.path.read_text().split()
-                    stale = now() - float(t) > LOCK_STALE_S or not pid_alive(int(pid))
-                except (OSError, ValueError):
-                    stale = now() - self._mtime() > LOCK_STALE_S
-                if stale:
-                    try:
-                        os.replace(self.path, ROOT / '.lock.stale')
-                    except OSError:
-                        pass
-                    continue
-            if now() > end:
-                raise RuntimeError('could not get %s within 60 s' % self.path)
-            time.sleep(0.02)
-
-    def _mtime(self):
+        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        end = time.monotonic() + LOCK_WAIT_S
         try:
-            return self.path.stat().st_mtime
-        except OSError:
-            return now()
+            while True:
+                try:
+                    if os.name == 'nt':
+                        import msvcrt
+                        os.lseek(self.fd, 0, os.SEEK_SET)
+                        msvcrt.locking(self.fd, msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except OSError as err:
+                    if err.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) and getattr(err, 'winerror', None) not in (33, 36):
+                        raise
+                    if time.monotonic() >= end:
+                        raise RuntimeError('could not get %s within %g s' % (self.path, LOCK_WAIT_S)) from err
+                    time.sleep(0.02)
+        except BaseException:
+            os.close(self.fd)
+            raise
 
     def __exit__(self, *exc):
         try:
-            if retry(self.path.read_text).strip() == self.token:  # a lock taken over as stale is not ours
-                retry(os.replace, self.path, ROOT / '.lock.last')
-        except OSError:
-            pass
+            if os.name == 'nt':
+                import msvcrt
+                os.lseek(self.fd, 0, os.SEEK_SET)
+                msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self.fd)
 
 
 # ---------- the ledger ----------
@@ -264,7 +298,7 @@ def close_lease(lease, event, note=''):
 def why_stale(lease):
     if lease.get('expires', 0) <= now():
         return 'expired at %s' % iso(lease.get('expires', 0))
-    if lease.get('pid') and not pid_alive(lease['pid']):
+    if lease.get('pid') and not pid_alive(lease['pid'], lease.get('pid_started')):
         return 'pid %s is dead' % lease['pid']
     return None
 
@@ -283,7 +317,7 @@ def reap():
         live.append(lease)
     queue = []
     for t in read_dir('queue'):
-        if now() - t.get('beat', 0) > QUEUE_STALE_S or not pid_alive(t.get('pid')):
+        if now() - t.get('beat', 0) > QUEUE_STALE_S or not pid_alive(t.get('pid'), t.get('pid_started')):
             drop('queue', t['id'])
             release_flag(t['id'])
         else:
@@ -305,7 +339,7 @@ Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, N
 
 def processes():
     """{pid: (ppid, name lower, command line lower with / slashes)} or None when the list cannot be read."""
-    if os.name != 'nt':
+    if not PROCESS_SCAN:
         return None
     try:
         p = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', PROCS_PS],
@@ -316,8 +350,11 @@ def processes():
         out = {}
         for ln in lines[:-1]:
             parts = ln.split('|', 3)
-            if len(parts) == 4 and parts[0].isdigit():
-                out[int(parts[0])] = (int(parts[1] or 0), parts[2].lower(), parts[3].replace('\\', '/').lower())
+            if len(parts) != 4 or not parts[0].isdigit() or not (parts[1] or '0').isdigit() or not parts[2]:
+                return None  # a partial or malformed process list is not a successful scan
+            out[int(parts[0])] = (int(parts[1] or 0), parts[2].lower(), parts[3].replace('\\', '/').lower())
+        if os.getpid() not in out:
+            return None  # a successful snapshot must include this process
         return out
     except Exception:
         return None
@@ -476,7 +513,11 @@ def gpu_free_gb():
         p = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'],
                            capture_output=True, timeout=15, stdin=subprocess.DEVNULL,
                            creationflags=0x08000000 if os.name == 'nt' else 0)
+        if p.returncode:
+            return None, None
         used, total = [float(x) for x in p.stdout.decode().strip().splitlines()[0].split(',')]
+        if not math.isfinite(used) or not math.isfinite(total) or total <= 0 or used < 0 or used > total:
+            return None, None
         return (total - used) / 1024.0, used / 1024.0
     except Exception:
         return None, None
@@ -509,73 +550,117 @@ def new_id():
 def new_lease(a, pid, lid):
     minutes = min(float(a.minutes), MAX_MINUTES)
     return {'id': lid, 'who': a.who, 'agent': a.agent, 'session': a.session or '', 'what': a.what, 'gb': float(a.gb),
-            'exclusive': bool(a.exclusive), 'yields': bool(a.yields), 'pid': pid,
+            'exclusive': bool(a.exclusive), 'yields': bool(a.yields), 'pid': pid, 'pid_started': pid_started(pid),
             'host': os.environ.get('COMPUTERNAME', ''), 'started': iso(), 'expires': int(now() + minutes * 60),
             'renewed': iso()}
 
 
+class TelemetryError(RuntimeError):
+    """Admission cannot safely proceed without both telemetry sources."""
+
+
 def claim(a, pid):
-    """(lease, None) or (None, reason). With --wait, queues and waits up to a.wait seconds."""
+    """(lease, None) or (None, reason). With --wait, queues and waits up to a.wait seconds.
+
+    Missing telemetry refuses admission (TelemetryError). With --wait it counts as a busy reason until the deadline:
+    the queue ticket is kept and the claim polls again; only a sample still missing at the deadline raises. Off
+    Windows process enumeration can never succeed, so the claim raises at once."""
     lid = new_id()
     end = now() + float(a.wait or 0)
     waiting = float(a.wait or 0) > 0
     last = None
     ticket = None
+
+    def hold_place(why):
+        """Write (or refresh) this claim's queue ticket. Caller holds the Lock."""
+        nonlocal ticket
+        if ticket is None:
+            ticket = {'id': lid, 'ts': now(), 'beat': now(), 'pid': os.getpid(),
+                      'pid_started': pid_started(os.getpid()), 'who': a.who,
+                      'what': a.what, 'gb': float(a.gb), 'exclusive': bool(a.exclusive),
+                      'yields': bool(a.yields)}
+            log_event('queued', ticket, reason=why)
+        ticket['beat'] = now()
+        write_json('queue', lid, ticket)
+
+    def admit(procs, free):
+        """One admission decision from this poll's sample. Caller holds the Lock. Returns (lease or None, why)."""
+        live, queue = reap()
+        seen = sync_seen(scan_seen(procs, live))
+        holders = live + seen
+        why = blockers(holders, float(a.gb), a.exclusive, free)
+        if TEST_HOLD_S:
+            time.sleep(TEST_HOLD_S)  # selftest only: widen the read-decide-write window so a missing lock shows
+        priority = (bool(a.yields), ticket['ts'] if ticket else now())
+        ahead = [t for t in queue if t['id'] != lid and
+                 (bool(t.get('yields')), t['ts']) < priority]
+        if why is None and ahead:
+            why = 'queued behind %s (%s: %s)' % (ahead[0]['id'], ahead[0]['who'], ahead[0]['what'])
+        if why is None:
+            lease = new_lease(a, pid, lid)
+            # Only foreground exclusive work raises the old "give me the GPU" flag; background (--yields) work
+            # must leave it free so a waiter can use it to ask that work to step aside.
+            # A waiter that asked background work to yield keeps its flag until its own lease closes, or
+            # the background job would come straight back mid-job.
+            raised = flag_owner(flag_lines()) == lid
+            if (a.exclusive and not a.yields) or raised:
+                if not write_flag(lid, a.who, lease['expires'], pid):
+                    why = 'cons-port/UNITY_PRIORITY appeared at the same moment'
+        if why is None:
+            write_json('active', lid, lease)
+            log_event('open', lease)
+            if ticket:
+                drop('queue', lid)
+            return lease, None
+        if waiting:
+            hold_place(why)
+            # Head of the line and blocked only by background (--yields) work: ask it to step aside.
+            if not a.yields and not ahead and not legacy_holds():
+                rest = [x for x in holders if not x.get('yields')]
+                if len(rest) < len(holders) and blockers(rest, float(a.gb), a.exclusive) is None:
+                    if write_flag(lid, a.who, int(end), 0) and why != last:
+                        log_event('yield-asked', ticket, yielding=[x.get('id') or x['key'] for x in holders
+                                                                   if x.get('yields')])
+        elif why != last:
+            log_event('refused', {'who': a.who, 'what': a.what, 'gb': float(a.gb),
+                                  'exclusive': bool(a.exclusive)}, reason=why)
+        return None, why
+
     try:
         while True:
-            procs = processes()
-            free, _ = gpu_free_gb()
+            blind = None  # the TelemetryError text when this poll could not read telemetry
             with Lock():
-                live, queue = reap()
-                seen = sync_seen(scan_seen(procs, live))
-                holders = live + seen
-                why = blockers(holders, float(a.gb), a.exclusive, free)
-                if TEST_HOLD_S:
-                    time.sleep(TEST_HOLD_S)  # selftest only: widen the read-decide-write window so a missing lock shows
-                ahead = [t for t in queue if t['id'] != lid and (ticket is None or
-                                                                 (bool(t.get('yields')), t['ts']) <
-                                                                 (bool(ticket.get('yields')), ticket['ts']))]
-                if why is None and ahead:
-                    why = 'queued behind %s (%s: %s)' % (ahead[0]['id'], ahead[0]['who'], ahead[0]['what'])
-                if why is None:
-                    lease = new_lease(a, pid, lid)
-                    # Only foreground exclusive work raises the old "give me the GPU" flag; background (--yields) work
-                    # must leave it free so a waiter can use it to ask that work to step aside.
-                    # A waiter that asked background work to yield keeps its flag until its own lease closes, or
-                    # the background job would come straight back mid-job.
-                    raised = flag_owner(flag_lines()) == lid
-                    if (a.exclusive and not a.yields) or raised:
-                        if not write_flag(lid, a.who, lease['expires'], pid):
-                            why = 'cons-port/UNITY_PRIORITY appeared at the same moment'
-                if why is None:
-                    write_json('active', lid, lease)
-                    log_event('open', lease)
-                    if ticket:
-                        drop('queue', lid)
-                    return lease, None
-                if waiting:
-                    if ticket is None:
-                        ticket = {'id': lid, 'ts': now(), 'beat': now(), 'pid': os.getpid(), 'who': a.who,
-                                  'what': a.what, 'gb': float(a.gb), 'exclusive': bool(a.exclusive),
-                                  'yields': bool(a.yields)}
-                        log_event('queued', ticket, reason=why)
-                    ticket['beat'] = now()
-                    write_json('queue', lid, ticket)
-                    # Head of the line and blocked only by background (--yields) work: ask it to step aside.
-                    if not a.yields and not ahead and not legacy_holds():
-                        rest = [x for x in holders if not x.get('yields')]
-                        if len(rest) < len(holders) and blockers(rest, float(a.gb), a.exclusive) is None:
-                            if write_flag(lid, a.who, int(end), 0) and why != last:
-                                log_event('yield-asked', ticket, yielding=[x.get('id') or x['key'] for x in holders
-                                                                           if x.get('yields')])
-                elif why != last:
-                    log_event('refused', {'who': a.who, 'what': a.what, 'gb': float(a.gb),
-                                          'exclusive': bool(a.exclusive)}, reason=why)
+                # A claimant may have waited for this lock. Sample after acquiring it so an unbooked
+                # process that started during that wait is not hidden by an old snapshot.
+                procs = processes()
+                free, _ = gpu_free_gb()
+                missing = []
+                if procs is None:
+                    missing.append('process enumeration (PowerShell/CIM)')
+                if free is None or not math.isfinite(free) or free < 0:
+                    missing.append('GPU free memory (nvidia-smi)')
+                if missing:
+                    if procs is None and not PROCESS_SCAN:
+                        raise TelemetryError('GPU admission refused: unavailable %s; process enumeration is '
+                                             'Windows-only, so this tool cannot admit GPU work on this platform; '
+                                             'use status for diagnostics' % ' and '.join(missing))
+                    blind = ('GPU admission refused: unavailable %s; restore telemetry and retry; '
+                             'use status for diagnostics' % ' and '.join(missing))
+                    if not waiting:
+                        raise TelemetryError(blind)
+                    why = 'telemetry unavailable: ' + ' and '.join(missing)
+                    hold_place(why)  # a blip while waiting: keep the place in line and poll again
+                else:
+                    lease, why = admit(procs, free)
+                    if lease:
+                        return lease, None
             if why != last:
                 if waiting:
                     sys.stderr.write('%s waiting: %s\n' % (iso(), why))
                 last = why
             if now() >= end:
+                if blind is not None:
+                    raise TelemetryError(blind)  # still no telemetry at the deadline
                 return None, why
             time.sleep(min(10.0, max(0.5, end - now())))
     finally:
@@ -685,13 +770,18 @@ def run(a, cmd):
     t.start()
     code = 1
     try:
-        code = subprocess.call(cmd)
+        # GPU_LEASE_ID lets the job (or a launcher it starts) adopt its own process tree or renew this booking.
+        try:
+            code = subprocess.call(cmd, env=dict(os.environ, GPU_LEASE_ID=lease['id']))
+        except OSError as err:  # not found / not runnable: 127 like a shell, never 3, which means "GPU busy"
+            print('could not start %s: %s' % (cmd[0] if cmd else '(no command)', err), flush=True)
+            code = 127
     finally:
         stop.set()
         try:
             release(lease['id'], 'run exited %s' % code)
             print('lease %s closed (exit %s)' % (lease['id'], code), flush=True)
-        except OSError as err:
+        except (OSError, RuntimeError) as err:  # RuntimeError: the ledger lock was not free within LOCK_WAIT_S
             print('lease %s NOT closed (%s); it lapses within %d min' % (lease['id'], err, HEARTBEAT_LEASE_MIN),
                   flush=True)
     return code
@@ -733,10 +823,12 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.op == 'status':
         return status(a.json)
-    if a.op in ('claim', 'run') and (a.gb <= 0 or a.gb > BUDGET_GB):
+    if a.op in ('claim', 'run') and (not math.isfinite(a.gb) or a.gb <= 0 or a.gb > BUDGET_GB):
         ap.error('--gb must be more than 0 and at most the %g GB budget' % BUDGET_GB)
-    if getattr(a, 'minutes', 1) <= 0:
-        ap.error('--minutes must be more than 0')
+    if not math.isfinite(getattr(a, 'minutes', 1)) or getattr(a, 'minutes', 1) <= 0:
+        ap.error('--minutes must be finite and more than 0')
+    if not math.isfinite(getattr(a, 'wait', 0)) or getattr(a, 'wait', 0) < 0:
+        ap.error('--wait must be finite and at least 0')
     if a.op == 'claim':
         lease, why = claim(a, a.pid)
         if not lease:
@@ -769,4 +861,8 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except TelemetryError as err:
+        print('GPU LEDGER ERROR: %s' % err, file=sys.stderr)
+        sys.exit(1)

@@ -24,8 +24,9 @@ alert nobody records cannot wake the desk chat in a loop.
 Options: --pipeline-root DIR (default: the PIPELINE_ROOT environment variable), --since UTC, --handover-max-age-hours H (opt-in, no
 default limit), --resumed-any-update (opt-in), --report-again-s S.
 The first line of exits 0, 2, 5 and 6 ends '(desk_watch <sha256[:12]>; exit5 inboxes=<n> ...; exit6 since <UTC>)', and
-every WARNING found in the run follows the hits, so a wrong root, an unlistable folder or an unreadable file is never a
-silent all-clear. A file that exists but cannot be read is never read as absent: that inbox (or, for
+every WARNING found in the last poll (plus the run's one-off exit6-since.txt note) follows the hits, so a wrong root,
+an unlistable folder or an unreadable file is never a silent all-clear, and a problem that has cleared is not reported
+hours later. A file that exists but cannot be read is never read as absent: that inbox (or, for
 recovery-sent.md, exits 5 and 6) is skipped for the poll with a WARNING, never alerted on.
 A background exit wakes an idle chat; the harness caps background jobs at 2 h,
 hence max-seconds 6900. Not a timer for anything else: it only looks at desk files.
@@ -620,8 +621,13 @@ def main():
     except (FileNotFoundError, IndexError):
         pass
     since = exit6_since(p, a.since, time.time())
+    run_warn = set(WARN)   # once-per-run notes (exit6-since.txt was just written) go with every exit of this run
     start = time.time()
     while True:
+        # Each poll reports only what is wrong in THIS poll: a file unreadable in hour 1 and fine since is not
+        # 'degraded' on the exit-2 line two hours later.
+        WARN.clear()
+        WARN.update(run_warn)
         if os.path.exists(p['stop']):
             print('desk_watch: STOP-WATCH found; stopping')
             if os.path.exists(p['alive']):
@@ -629,12 +635,14 @@ def main():
             sys.exit(3)
         with open(p['alive'], 'w', encoding='utf-8') as f:
             f.write('%d %s\n' % (os.getpid(), time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())))
-        offsets = desk_files.load_offsets(p)
+        offsets = desk_files.load_offsets(p, WARN)
         hits = []
         for name in desk_files.lane_files(p):
             try:
                 lines, _, _ = desk_files.new_lines(p, name, offsets)
-            except OSError:
+            except OSError as e:   # never a silent all-clear: its [DESK Q] lines went unchecked, so say so
+                WARN.add('WARNING lane file %s unreadable (%s): its [DESK Q] lines were not checked this poll'
+                         % (name, type(e).__name__))
                 continue
             # A copied question that already has its answer ends with "(answered ...": desk_read still shows it.
             hits += ['%s: %s' % (name, l[:300]) for l in lines if desk_files.kind(l) == 'Q' and '(answered' not in l]

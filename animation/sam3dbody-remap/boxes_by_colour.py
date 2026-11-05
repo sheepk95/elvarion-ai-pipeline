@@ -1,18 +1,20 @@
-"""Per-man boxes for a two-man take with NO subject-mask hand-off.
+"""Per-person boxes for a two-person take with NO subject-mask hand-off.
 
-Where the men overlap, one box can grab the other man: cap its edge by hand and check every box on the key-frame sheet
-(keyframe_sheet.py --boxes) before running SAM.
+Where the two people overlap, one box can grab the other person: cap its edge by hand and check every box on the
+key-frame sheet (keyframe_sheet.py --boxes) before running SAM.
 
-The two men differ in colour (here a silver killer and a dark-green victim) on a plain grey background, so:
-1. foreground = pixels whose Lab colour is far from the frame's background grey (median of the border);
-2. a colour model per man is learned from the early frames where the men stand apart (left / right blob);
+It assumes the two people differ in colour (for example one in light clothing, one in dark) on a plain, uniform
+background, so:
+1. foreground = pixels whose Lab colour is far from the frame's background colour (median of the border);
+2. a colour model per person is learned from the early frames where the two stand apart (left / right of --split-x);
 3. every frame's foreground pixels are labelled by the colour model (Lab histogram ratio), cleaned by an opening
-   (which also drops the thin spear and sword), and each man's box is the bbox of his largest blobs.
-Writes the boxes_from_mask.py format ({"frames", "empty", "boxes": {"<i>": [[x0, y0, x1, y1]]}}) per man, plus a
-mask mp4 per man for checking.
+   (which also drops thin held props such as poles or blades), and each person's box is the bbox of the largest blobs.
+Writes the boxes_from_mask.py format ({"frames", "empty", "boxes": {"<i>": [[x0, y0, x1, y1]]}}) per person, plus a
+mask mp4 per person for checking.
 
-Usage: python -I -B boxes_by_colour.py <take.mp4> <out dir> [--train 0-12] [--split-x 360] [--pad 0.04]
-       names: left man = killer, right man = victim (change with --names)
+Usage: python -I -B boxes_by_colour.py <take.mp4> <out dir> [--train 0-12] [--split-x <px>] [--pad 0.04]
+       [--names person_a,person_b]
+       --split-x defaults to half the frame width; names: left person first, right person second.
 """
 import argparse, json, os
 
@@ -42,14 +44,15 @@ def main():
     ap.add_argument("video")
     ap.add_argument("out")
     ap.add_argument("--train", default="0-12")
-    ap.add_argument("--split-x", type=int, default=360)
+    ap.add_argument("--split-x", type=int, default=None, help="x pixel between the two people in the --train "
+                    "frames (default: half the frame width)")
     ap.add_argument("--pad", type=float, default=0.04)
     ap.add_argument("--thr", type=float, default=14.0)
-    ap.add_argument("--open", default="5,7", help="opening size per man (left,right); drops spear/sword")
+    ap.add_argument("--open", default="5,7", help="opening size per person (left,right); drops thin held props")
     ap.add_argument("--grow", type=float, default=0.15, help="tracking: blobs must touch the previous box grown by this")
     ap.add_argument("--vmax", type=float, default=25.0, help="max px a box edge moves per frame (0 = off)")
     ap.add_argument("--minfrac", type=float, default=0.05, help="keep blobs at least this share of the biggest")
-    ap.add_argument("--names", default="killer,victim")
+    ap.add_argument("--names", default="person_a,person_b", help="output names, left person first")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     names = a.names.split(",")
@@ -61,6 +64,10 @@ def main():
             break
         frames.append(im)
     cap.release()
+    if not frames:
+        raise SystemExit(f"boxes_by_colour.py: no frames read from {a.video}")
+    if a.split_x is None:
+        a.split_x = frames[0].shape[1] // 2
     t0, t1 = map(int, a.train.split("-"))
     hist = [np.ones(BINS ** 3), np.ones(BINS ** 3)]
     for i in range(t0, t1 + 1):

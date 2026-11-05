@@ -9,3 +9,5 @@ desk/tools/state/
 librarian/mailbox/
 librarian/catalogue/
 **/__pycache__/
+animation/sam3dbody-remap/src/
+.check-logs/

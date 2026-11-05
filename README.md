@@ -49,18 +49,22 @@ Integrator (merges) -> player testing with real input
 
 Start with [docs/overview.md](docs/overview.md).
 
+For a first local run, follow [the quick start](docs/quickstart.md). It checks the tools in a temporary workspace
+before you connect any live chats. [CONTRIBUTING.md](CONTRIBUTING.md) describes the test command and review process.
+
 ## What's in this repo
 
 | Folder | What it is |
 |---|---|
 | [docs/](docs/) | How the setup fits together: overview, desk, review ladder, picking agents, animation |
-| [pipeline/](pipeline/) | The lane pipeline: the brief, short rules, coordinator / job card / gate templates, an example lane, a worked example, and the inbox tools |
+| [pipeline/](pipeline/) | The lane pipeline: the brief, short rules, coordinator / job card / gate / grill / hand-over / tried-and-failed templates, an example lane, a worked example, and the inbox tools |
 | [desk/](desk/) | Tools for the one chat you talk to: read new desk lines, wait for a new question, wake at a time |
 | [gpu-lease/](gpu-lease/) | A small ledger that agents use to book and release the GPU |
 | [librarian/](librarian/) | The skill librarian: a file mailbox between chats and a long-lived librarian chat, plus the skill index builder |
 | [hooks/](hooks/) | A Claude Code hook that injects a recipe into every new chat and subagent |
 | [skills/](skills/) | Six verification skills (tests that can fail, measuring the right thing, shared trees) |
 | [animation/](animation/) | Scripts from the video-to-animation remap kit |
+| [tools/](tools/) | `run_checks.py` (every offline check, with logs) and `demo_job.py` (a one-job walkthrough in a temporary folder) |
 
 ## What's not in this repo
 
@@ -72,7 +76,11 @@ Start with [docs/overview.md](docs/overview.md).
 ## Requirements
 
 - Windows 10/11. Some tools use Windows APIs; most are Python 3.11+ standard library only.
-- Claude Code (desktop app or CLI). Codex is optional.
+- Python 3.11+ and Git for the local checks.
+- The multi-chat workflow described here uses Claude Code in the **Claude desktop app**, with host capabilities to
+  create/message chats and resume a chat when its background tool finishes. These capabilities are not supplied by
+  the Python scripts. A CLI-only setup can use the file tools and hooks, but must arrange its own chat lifecycle and
+  wake-up mechanism. Codex is optional. See the [host support table](docs/quickstart.md#host-requirements).
 - Paths in the docs are written as `<USER_HOME>` (your home folder) and `<PROJECT_ROOT>` (the folder that holds
   your project and its agent workspace). The tools read their folders from environment variables or work them out
   from their own location; each script says which at the top.
@@ -81,9 +89,12 @@ Start with [docs/overview.md](docs/overview.md).
 
 ## Status
 
-This is a working setup, not a polished product. It grew one rule at a time while I was making a game, and it
+This is an **experimental Windows starter kit**, not a packaged agent service. It grew one rule at a time while I was making a game, and it
 still does. If people find it useful I'll keep cleaning it up and add more of the tools. Feedback is welcome in
 Issues.
+
+Run `python -I -B tools/run_checks.py` for the CPU-only checks. The included Windows CI workflow is configured to run that command on Python
+3.11 and 3.13. GPU workloads, animation quality and live desktop chat wake-ups require separate acceptance checks.
 
 ## Licence
 

@@ -62,6 +62,13 @@ def parse_args(argv):
         opt[k] = v
     if opt["--final"] not in ("yes", "no"):
         usage("--final yes|no")
+    for key in ("--min-words", "--min-pictures"):
+        try:
+            value = int(opt[key])
+        except ValueError:
+            usage(f"{key} must be a positive integer")
+        if value < 1:
+            usage(f"{key} must be a positive integer")
     return argv[0], opt
 
 
@@ -162,6 +169,8 @@ def main():
     copy, opt = parse_args(sys.argv[1:])
     if not os.path.isfile(copy):
         usage(f"no such copy: {copy}")
+    if not os.path.isfile(opt["--checklist"]):
+        usage(f"no such checklist: {opt['--checklist']}")
     master_text = open(opt["--checklist"], encoding="utf-8", errors="replace").read()
     text = open(copy, encoding="utf-8", errors="replace").read()
     master = items(master_text)
@@ -175,9 +184,9 @@ def main():
     problems = []
     P = lambda code, msg: problems.append(f"CHECK_REVIEW {code} {msg}")
     min_words = int(opt["--min-words"])
-    blend_t = os.path.getmtime(opt["--blend"]) if opt["--blend"] else None
     if opt["--blend"] and not os.path.isfile(opt["--blend"]):
         usage(f"no such blend: {opt['--blend']}")
+    blend_t = os.path.getmtime(opt["--blend"]) if opt["--blend"] else None
     here = os.path.dirname(os.path.abspath(copy))
 
     for i in want_ids:
@@ -233,7 +242,7 @@ def main():
             P("PASTED", f"the same description on {len(ids)} items ({', '.join(ids)}): describe each look")
 
     distinct = len(set(p for _, _, p in pics))
-    if pics and distinct < int(opt["--min-pictures"]):
+    if distinct < int(opt["--min-pictures"]):
         P("FEW_PICTURES", f"{distinct} different pictures named across the look items; at least {opt['--min-pictures']} "
                           "(body, close-up, top and real-material sheets)")
     sheets = []

@@ -22,7 +22,8 @@ AI video take (MiniMax, paid)  ->  boxes  ->  SAM 3D Body per frame (GPU)  ->  c
   licence with anything you redistribute. This repo contains none of it: you fetch the code
   (<https://github.com/facebookresearch/sam-3d-body>) and the weights (`facebook/sam-3d-body-vith` on Hugging Face,
   gated) yourself, read the licence, and **load only weights whose hashes match** Meta's published ones, because the
-  files are pickle / TorchScript and loading one can run code. Details and the hash check:
+  files are pickle / TorchScript and loading one can run code; `run_sam3db.py` checks them itself and refuses to load
+  a checkpoint that does not match. Details and the hash check:
   [`animation/sam3dbody-remap/README.md`](../animation/sam3dbody-remap/README.md).
 - **Blender and Auto-Rig Pro.** Your rig lives in Blender. The remap step here used Auto-Rig Pro's Remap, a **paid
   add-on**; the three scripts plus a preflight helper in `examples-auto-rig-pro/` drive it and only make sense with it and your own rig. Any
@@ -97,7 +98,7 @@ importer. A direct call that forces the animation is a component test, not a pla
 - Depth: the picture agrees and the top view does not. A shield "too close to the body" can be a depth error.
 - Hands twisted by the same angle on every frame: the A-to-T turn lined up bone directions but not the palm.
 - A weapon pointing up in a level thrust, because SAM put the wrong hand on a hidden hilt.
-- Smoothing removed a real flick (a sword cut). Keep windows around the hits.
+- Smoothing removed a real flick (a fast swing). Keep windows around the hits.
 - A check that passes because its expectation came from the output it checks. Derive expectations from something that
   exists before the run.
 

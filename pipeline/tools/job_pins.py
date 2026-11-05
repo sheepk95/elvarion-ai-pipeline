@@ -18,8 +18,9 @@ Usage:
   python -I -B <PIPELINE_ROOT>/tools/job_pins.py <job> --check [--ready <READY item file>] [--root <dir>]
   python -I -B <PIPELINE_ROOT>/tools/job_pins.py --self-test
 Exit: 0 printed / pins OK (a print with a DIFFERS line is still 0); 1 MISMATCH (--check); 2 a record, line or file is
-missing or unreadable (a Reads: row that does not parse, or a file it names, too), git failed, or the worktree is not on
-the card's branch. Stdlib only. A sibling tool that wants to reuse it can load this file by path (python -I drops the
+missing or unreadable (a Reads: row that does not parse, or a file it names, too), a record holds two different pins
+lines, git failed, the worktree is not on the card's branch, or it has tracked or untracked (non-ignored) changes (the
+error names the first changed paths). Stdlib only. A sibling tool that wants to reuse it can load this file by path (python -I drops the
 script's folder from sys.path).
 """
 import argparse
@@ -53,7 +54,8 @@ EXAMPLES = r"""examples:
     python -I -B <PIPELINE_ROOT>/tools/job_pins.py economy-1 --check --ready "<PIPELINE_ROOT>/lanes/integrator/inbox/builder/<READY item>.md"
   self-test (born red: a planted mismatch must fail):
     python -I -B <PIPELINE_ROOT>/tools/job_pins.py --self-test
-exit: 0 ok; 1 MISMATCH (--check); 2 missing or unreadable record, git error, wrong branch
+exit: 0 ok; 1 MISMATCH (--check); 2 missing or unreadable record, two different pins lines in one record, git error,
+wrong branch, dirty worktree
 """
 
 
@@ -214,9 +216,11 @@ def reads_lines(card):
 
 
 def git_run(wt, *args):
-    """(returncode, stdout, stderr) of `git -C <wt> <args>`; never raises."""
+    """(returncode, stdout, stderr) of `git -C <wt> <args>`; never raises. Every call here only reads, so it passes
+    --no-optional-locks: `git status` must not take index.lock and collide with a builder's commit in that worktree."""
     try:
-        p = subprocess.run(["git", "-C", wt] + list(args), capture_output=True, text=True, encoding="utf-8",
+        p = subprocess.run(["git", "--no-optional-locks", "-C", wt] + list(args), capture_output=True, text=True,
+                           encoding="utf-8",
                            errors="replace", timeout=300)
     except (OSError, subprocess.TimeoutExpired) as e:
         return 99, "", str(e)
@@ -247,6 +251,13 @@ def work_state(card, override=None):
         br = git(w["worktree"], "rev-parse", "--abbrev-ref", "HEAD")
         if br != w["branch"]:
             raise PinError("worktree %s is on branch %s; the card says %s" % (q(w["worktree"]), br, w["branch"]))
+        dirty = git(w["worktree"], "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none")
+        if dirty:
+            changed = [ln.strip().split(None, 1)[-1] for ln in dirty.splitlines() if ln.strip()]
+            more = " (and %d more)" % (len(changed) - 5) if len(changed) > 5 else ""
+            raise PinError("worktree %s has tracked or untracked (non-ignored) changes; first changes: %s%s; commit or "
+                           "move them out before pinning current work; do not git clean proof media"
+                           % (q(w["worktree"]), "; ".join(changed[:5]), more))
         return "commit", git(w["worktree"], "rev-parse", "HEAD")
     shas = [sha_file(f) for f in w["files"]]
     return "file", shas[0] if len(shas) == 1 else sha_bytes("\n".join(shas).encode("ascii"))
@@ -265,24 +276,31 @@ def pins_line(card, work_full):
 
 
 def find_pins(path, top=5):
-    """(card, scorecard, work) from the top 5 lines of a REVIEW-, TEST- or GATE- record, or None. top=None reads a
-    whole item (send_item.py writes 5 header lines first, so an item's pins line is line 6 or later); two different
-    pins lines in one item are ambiguous (PinError). Raises PinError when unreadable."""
+    """(card, scorecard, work) from the top 5 lines of a REVIEW-, TEST- or GATE- record, or None when those lines hold
+    no pins line (a pins line further down never counts as the record's pin). top=None reads a whole item (send_item.py
+    writes 5 header lines first, so an item's pins line is line 6 or later). Either way the WHOLE file is scanned:
+    two different pins lines anywhere in one record or item are ambiguous (PinError). Raises PinError when unreadable."""
     try:
         with open(path, encoding="utf-8-sig", errors="replace") as fh:
             lines = fh.read().splitlines()
     except OSError as e:
         raise PinError("cannot read %s: %s" % (q(path), e))
-    found = []
-    for ln in (lines if top is None else lines[:top]):
+    found, head = [], None
+    for i, ln in enumerate(lines):
         m = PINS_RE.match(ln.strip())
-        if m and m.groups() not in found:
+        if not m:
+            continue
+        if m.groups() not in found:
             found.append(m.groups())
-            if top is not None:
-                break
+        if head is None and (top is None or i < top):
+            head = m.groups()
+    if head is None:
+        return None
     if len(found) > 1:
-        raise PinError("%s holds %d different pins lines; an item carries exactly one" % (q(path), len(found)))
-    return found[0] if found else None
+        raise PinError("%s holds %d different pins lines; a record or item carries exactly one (the pins line %s, "
+                       "and no other pins line anywhere in the file)"
+                       % (q(path), len(found), "anywhere" if top is None else "in its top %d lines" % top))
+    return head
 
 
 def newest(jobdir, prefix):
@@ -302,16 +320,29 @@ def same_work(a, b):
     return a == b
 
 
-def older_gate_works(card, newest_gate):
-    """Work pins of the job's GATE files other than the newest (a skipped tester must have tested some gate's work)."""
-    out = []
-    for f in sorted(os.listdir(card["dir"])):
-        p = os.path.join(card["dir"], f)
-        if re.match(r"^GATE-\d+\.md$", f) and os.path.normcase(p) != os.path.normcase(newest_gate):
-            fp = find_pins(p)
-            if fp:
-                out.append(fp[2])
-    return out
+def scoped_prior_pins(card, gate_path, scoped):
+    """Resolve only the earlier gate explicitly named by this scoped re-gate."""
+    current = re.fullmatch(r"GATE-(\d+)\.md", os.path.basename(gate_path))
+    number = int(scoped.group(1))
+    if not current or number >= int(current.group(1)):
+        return None
+    prior = os.path.join(card["dir"], "GATE-%d.md" % number)
+    return find_pins(prior) if os.path.isfile(prior) else None
+
+
+def scoped_refusal(card, gate_path, scoped, skip, test_pins, gp):
+    """None when a scoped re-gate may reuse this older TEST, else which condition failed (for the NOTE line)."""
+    if not skip:
+        return "the gate file has no 'tester not re-run: <why>' line in its first 2000 characters"
+    if test_pins[:2] != gp[:2]:
+        return "the TEST's card or scorecard pin differs from the current gate's"
+    prior = scoped_prior_pins(card, gate_path, scoped)
+    if prior is None:
+        return ("the named GATE-%s is missing, has no pins line in its top 5 lines, or is not earlier than this gate"
+                % scoped.group(1))
+    if test_pins != prior:
+        return "the TEST's pins differ from the named GATE-%s's" % scoped.group(1)
+    return None
 
 
 # >>> COMMANDS
@@ -343,7 +374,7 @@ def cmd_check(root, job, ready):
     jd = card["dir"]
     recs = [("REVIEW", newest(jd, "REVIEW")), ("TEST", newest(jd, "TEST")), ("GATE", newest(jd, "GATE"))]
     missing = []
-    for name, p in recs[1:]:
+    for name, p in recs:
         if p is None:
             missing.append(("MISSING %s-<n>.md in %s: none found (nothing to check is never a pass)" % (name, q(jd)),
                             os.path.join(jd, "%s-<n>.md" % name)))
@@ -370,24 +401,28 @@ def cmd_check(root, job, ready):
     gp = pins["GATE"]
     with open(dict(recs)["GATE"], "rb") as fh:     # a skipped tester is a scoped re-gate's own line
         gtxt = fh.read(4000).decode("utf-8-sig", errors="replace")[:2000]
-    scoped = re.search(r"(?m)^#?\s*SCOPED RE-GATE of GATE-\d+", gtxt)
+    scoped = re.search(r"(?m)^#?\s*SCOPED RE-GATE of GATE-(\d+)\s*$", gtxt)
     skip = re.search(r"(?m)^tester not re-run: .+", gtxt)
-    bad, notes = [], []
+    bad, notes, why_not = [], [], []
     for name in ("REVIEW", "TEST", "READY"):
-        if name in pins and not same_work(pins[name][2], gp[2]):
-            if (name == "TEST" and scoped and skip and
-                    any(same_work(pins[name][2], x) for x in older_gate_works(card, dict(recs)["GATE"]))):
+        if name not in pins or pins[name] == gp:
+            continue
+        if name == "TEST" and scoped:
+            why = scoped_refusal(card, dict(recs)["GATE"], scoped, skip, pins[name], gp)
+            if why is None:
                 notes.append("TEST older than GATE: tester not re-run: %s" % skip.group(0).strip())
-            else:
-                bad.append("MISMATCH work %s vs GATE: %s vs %s" % (name, pins[name][2], gp[2]))
+                continue
+            why_not.append("NOTE scoped re-gate of GATE-%s: the older TEST is not accepted: %s" % (scoped.group(1), why))
+        for index, field in enumerate(("card", "scorecard", "work")):
+            if pins[name][index] != gp[index]:
+                bad.append("MISMATCH %s %s vs GATE: %s vs %s" %
+                           (field, name, pins[name][index], gp[index]))
     if gp[0] != cur_c:
         bad.append("MISMATCH card GATE vs JOB.md now: %s vs %s (read the newest JOB.md.pre-* copy)" % (gp[0], cur_c))
     if gp[1] != cur_s:
         bad.append("MISMATCH scorecard GATE vs score card now: %s vs %s" % (gp[1], cur_s))
     if not same_work(cur_w, gp[2]):
         bad.append("MISMATCH work now vs GATE: %s vs %s" % (cur_w, gp[2]))
-    if "READY" in pins and pins["READY"] != gp:
-        bad.append("MISMATCH READY pins line vs GATE: %s vs %s" % (" | ".join(pins["READY"]), " | ".join(gp)))
     rs = reads_state(card)
     moved = [(p, pin, cur) for p, pin, cur in rs if pin != cur]
     for p, pin, cur in moved:
@@ -399,7 +434,7 @@ def cmd_check(root, job, ready):
               "a TEST-ASK and a new gate on the current pins (RULES.md step 5)")
         return 1
     if bad:
-        for b in bad:
+        for b in bad + why_not:
             print(b)
         print("next: read what changed (newest JOB.md.pre-* copy; git -C <worktree> diff <gate work>..HEAD), then "
               "TEST-ASK and a new gate on the current pins (RULES.md step 5)")
@@ -409,7 +444,9 @@ def cmd_check(root, job, ready):
     print("pins OK: pins: card %s | scorecard %s | work %s" % gp)
     if rs:
         print("reads OK: %d pinned file(s) match the card" % len(rs))
-    print("next: send DONE / READY with this pins line (Integrator: merge)")
+    print("next: send DONE / READY with this pins line. Matching pins prove only that the records name the "
+          "same card, scorecard and work; they are not a gate PASS or the owner's GO: the integrator checks both "
+          "before any merge")
     return 0
 # <<< COMMANDS
 

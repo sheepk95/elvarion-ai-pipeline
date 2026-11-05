@@ -13,8 +13,9 @@ folder holding this file). Where a card, a hand-over note or an old item disagre
 - Effort never goes to max; reviewers and helpers stay at or below extra-high ([docs/picking-agents.md](../docs/picking-agents.md)).
 
 ## Items: how chats talk
-- One Markdown file per message in the receiver's inbox folder, written by `tools/send_item.py` (it writes `.tmp`,
-  then renames, so a reader never sees half an item). File `<UTC>-<from>-<n>.md`; header lines `id:`, `kind:`,
+- One Markdown file per message in the receiver's inbox folder, written by `tools/send_item.py` (it closes a unique
+  temporary file, then publishes a no-overwrite hard link, so a reader never sees half an item or loses an existing
+  one to a collision). Use a filesystem supporting hard links. File `<UTC>-<from>-<n>.md`; header lines `id:`, `kind:`,
   `from:`, `refs:`, then the body.
 - Inboxes: `lanes/<slug>/inbox/builder`, `.../reviewer`, `.../tester`, `coordinator/inbox`,
   `lanes/integrator/inbox/builder`, `lanes/player-tester/inbox/builder`. Send to a leaf folder, never to a folder
@@ -31,8 +32,11 @@ folder holding this file). Where a card, a hand-over note or an old item disagre
   After an app restart or account switch, `tools/switch_census.py` lists the chats whose waiter died and have unread items.
 - **Pins.** Job items and every REVIEW-, TEST- and GATE- file carry `pins: card <sha12> | scorecard <sha12> | work
   <sha12>` from `tools/job_pins.py <job>`. A receiver re-runs it before acting; a differing pin means something changed
-  since the sender looked: read what changed first. Before merge, `job_pins.py <job> --check` proves that what was tested
-  is what was gated.
+  since the sender looked: read what changed first. Before merge, `job_pins.py <job> --check` compares the current
+  identity with the REVIEW, TEST and GATE records. Current commit pins require a clean worktree. An explicitly named
+  scoped re-gate can reuse older TEST work only when its card/scorecard match the current gate and its entire tuple
+  matches that earlier gate, and the gate file holds a `tester not re-run: <why>` line. Identity checks do not establish a PASS verdict or the owner's permission: read those
+  separately, keep source fixed during verification, and merge the exact accepted commit.
 
 ## Account switch
 An app restart or account switch kills every chat's inbox waiter. The coordinator runs `tools/switch_census.py` and

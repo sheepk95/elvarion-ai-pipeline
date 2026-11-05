@@ -1,18 +1,18 @@
-"""Frame-by-frame sheets and clips from render_views.py output: the take, our character laid over the take, the other
+"""Frame-by-frame sheets and clips from render_views.py output: the take, your character laid over the take, the other
 angles and hand close-ups, one row per frame.
 
 render_views.py (not in this kit: it is Blender code written around one rig) is expected to have written, into the
 render folder, PNGs named <view>_<video frame:04d>.png for the views video, top, left, right, back (the "video" PNG is
-RGBA: our render from the take's own camera), plus a views-info.json. See README.md for the shape of that file.
+RGBA: your render from the take's own camera), plus a views-info.json. See README.md for the shape of that file.
 
 Columns (--cols, any order; or a set name):
-  video = the take; over = our video-camera render laid over the take (55%); ours = that render alone on grey;
+  video = the take; over = your video-camera render laid over the take (55%); ours = that render alone on grey;
   top / left / right / back = those renders;
   zl1 / zr1 / zl2 / zr2 ... = a close-up on man N's left / right hand (with its shield or weapon): two tiles, the take
-  and ours over the take, the same pixels. The box is the same size all clip long and follows the hand.
+  and your render ("ours") over the take, the same pixels. The box is the same size all clip long and follows the hand.
   Sets: body = video,over,top,left,right,back (the default); close = zl and zr for every man in views-info.json.
-Each video/over tile is cropped once to the box of the take's foreground and our render over the whole clip.
-Labels sit INSIDE each tile; the over tile also shows IoU = how much of the take's outline our outline covers, as
+Each video/over tile is cropped once to the box of the take's foreground and your render over the whole clip.
+Labels sit INSIDE each tile; the over tile also shows IoU = how much of the take's outline your render's outline covers, as
 overlap / union (a sudden drop marks a frame where the fit broke). Marked renders get a legend bar on each sheet.
 Writes: <out>/sheet_v<first>-v<last>.png (--rows frames each: go through EVERY sheet), <out>/rows/row_v<NNN>.png,
 <out>/iou.json, and <out>/<tag>-muted.mp4 at the take's speed and <tag>-half-muted.mp4 at half speed (no audio).
@@ -83,7 +83,7 @@ def box_of(m, minpix=3):
     return (cs.min(), rows.min(), cs.max(), rows.max()) if len(rows) and len(cs) else None
 
 
-# one crop for the video-camera columns over the whole clip: the take's foreground plus our render
+# one crop for the video-camera columns over the whole clip: the take's foreground plus your render
 x0, y0, x1, y1 = W, H, 0, 0
 iou = {}
 for f in keys:

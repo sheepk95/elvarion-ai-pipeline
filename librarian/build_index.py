@@ -21,20 +21,23 @@ Version 2:
   there). A-library copies (_manifests/<name>.json) and anything under skill-library/_snapshot-* are copies, never rows.
   The old "library copy if its manifest says match" branch is gone: that flag was frozen at copy time.
 - The disk is re-read on every build, so a new install (in either root) gets its row on the next build. The
-  installer runs `--after-install <name>`, which rebuilds and refuses (exit 4) unless that name has exactly one vetted
-  row whose path is its live SKILL.md.
+  installer runs `--after-install <name>`, which rebuilds and refuses (exit 4) unless that name has exactly one row
+  whose path is its live SKILL.md. The row's status is reported in the JSON ("status"): a fresh install with no
+  matching owner TRUST.json entry is `installed-unverified` (installed, review pending), which still passes.
+  --simulate-install applies the same check to the row an install would get (the candidate folder is hashed against
+  TRUST.json; the row shows the projected destination path).
 - App-managed skills (plugins, synced claude.ai skills, Codex .system, shared brain skills) come from the gate list
   (<SKILL_RECORDS>/gate-folders.json) as status `app` rows: always available natively,
   never hidden, never installed or edited by us. ~/.codex files are never opened (existence check only).
 - main() is guarded, so importing this file no longer rebuilds the INDEX (trap: an import used to rebuild it).
 Usage: python -I -B build_index.py [--check] [--gate GATE.json] [--allow-empty]
-       (--allow-empty: write an empty INDEX even when SKILLS_DIR holds SKILL.md files but the build found 0 vetted rows;
-        without it that case exits 1 with an ERROR and writes nothing. -h / --help prints this text and exits 0.)
+       (--allow-empty: write an empty INDEX even when SKILLS_DIR holds SKILL.md files but the build found 0 skill rows
+        (vetted or installed-unverified); without it that case exits 1 with an ERROR and writes nothing. -h / --help prints this text and exits 0.)
        python -I -B build_index.py --after-install <name>          (rebuild, then verify that name's row; JSON out)
        python -I -B build_index.py --simulate-install <name>=<dir>  (dry run: build in memory as if <dir> were installed
                                                                      at skill-library/<name>; writes nothing)
 """
-import json, os, re, sys, time
+import hashlib, json, os, re, sys, time
 
 
 class T:
@@ -162,6 +165,42 @@ def norm(p):
     return os.path.normcase(os.path.normpath(os.path.abspath(p)))
 
 
+def package_manifest(skill_file):
+    """Hash every regular package file without following links or reparse points.
+
+    No paths are excluded. An unsafe or unreadable entry invalidates the whole package.
+    """
+    root = os.path.dirname(skill_file)
+    manifest = {}
+
+    def unsafe(st):
+        return bool(getattr(st, 'st_file_attributes', 0) & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+
+    root_stat = os.lstat(root)
+    if os.path.islink(root) or unsafe(root_stat):
+        raise ValueError('package root is a link or reparse point')
+
+    def visit(folder, prefix=''):
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                relative = prefix + entry.name
+                st = entry.stat(follow_symlinks=False)
+                if entry.is_symlink() or unsafe(st):
+                    raise ValueError('link or reparse point: ' + relative)
+                if entry.is_dir(follow_symlinks=False):
+                    visit(entry.path, relative + '/')
+                elif entry.is_file(follow_symlinks=False):
+                    with open(entry.path, 'rb') as f:
+                        manifest[relative] = hashlib.file_digest(f, 'sha256').hexdigest()
+                else:
+                    raise ValueError('not a regular file: ' + relative)
+
+    visit(root)
+    if 'SKILL.md' not in manifest:
+        raise ValueError('missing SKILL.md')
+    return manifest
+
+
 def library_installs(installs):
     """Folders INSTALLS.jsonl says the installer put inside skill-library (a library install)."""
     out = set()
@@ -175,7 +214,10 @@ def library_installs(installs):
 def scan_skills(installs, simulate=None):
     """name -> (SKILL.md path, frontmatter, root kind). Real skills only; copies never count. simulate = (name, dir)."""
     vetted, warn = {}, []
-    for n in sorted(os.listdir(T.SRC)):
+    for root in (T.SRC, T.LIB):
+        if not os.path.isdir(root):
+            warn.append("missing directory: %s (treated as empty; create it before writing an index)" % root)
+    for n in sorted(os.listdir(T.SRC) if os.path.isdir(T.SRC) else []):
         p = os.path.join(T.SRC, n)
         sk = os.path.join(p, "SKILL.md")
         if n in T.SKIP_TOP or n.startswith("_") or not os.path.isdir(p) or not os.path.isfile(sk):
@@ -185,7 +227,7 @@ def scan_skills(installs, simulate=None):
             warn.append("name != folder: %s %s" % (n, fm.get("name")))
         vetted[n] = (sk, fm, "claude")
     lib_inst = library_installs(installs)
-    for n in sorted(os.listdir(T.LIB)):
+    for n in sorted(os.listdir(T.LIB) if os.path.isdir(T.LIB) else []):
         p = os.path.join(T.LIB, n)
         sk = os.path.join(p, "SKILL.md")
         if n.startswith("_") or not os.path.isdir(p) or not os.path.isfile(sk):
@@ -252,10 +294,32 @@ def build(simulate=None, gate_path=GATE):
     for r in jl(REVIEWS):
         reviews[(r.get("source_id"), r.get("commit"))] = r
     vetted, warn = scan_skills(installs, simulate)
+    trust_path = os.path.join(RECORDS, "TRUST.json")
+    try:
+        with open(trust_path, encoding="utf-8") as f:
+            trust = json.load(f)
+        if not isinstance(trust, dict):
+            raise ValueError("expected an object")
+    except FileNotFoundError:
+        trust = {}
+    except (OSError, ValueError) as e:
+        trust = {}
+        warn.append("invalid TRUST.json: %s; all installed skills require review" % e)
     rows = []
     for n in sorted(vetted):
         sk, fm, where = vetted[n]
+        # A simulated install has no destination folder yet: hash the candidate the installer would copy there.
+        package_file = os.path.join(simulate[1], "SKILL.md") if simulate and n == simulate[0] and where == "library (simulated)" else sk
         inst = installs.get(n)
+        rv = reviews.get((inst.get("source_id"), inst.get("commit")), {}) if inst else {}
+        entry = trust.get(n)
+        approved = False
+        if isinstance(entry, dict) and entry.get("kind") in ("reviewed", "in-house") and isinstance(entry.get("provenance"), str) and entry["provenance"].strip():
+            try:
+                approved = isinstance(entry.get("files"), dict) and entry["files"] == package_manifest(package_file)
+            except (OSError, ValueError):
+                pass
+        status = "vetted" if approved else "installed-unverified"
         if inst:
             rv = reviews.get((inst.get("source_id"), inst.get("commit")), {})
             src = "community %s@%s %s" % (inst.get("source_id"), (inst.get("commit") or "")[:7], inst.get("trust") or "")
@@ -265,12 +329,16 @@ def build(simulate=None, gate_path=GATE):
         elif n.startswith("anthropic-"):
             src, vd = "anthropic (bundled copy)", "installed before the install log"
         else:
-            src, vd = "in-house", "in-house or pre-existing"
+            src, vd = "unknown", "no recorded install provenance"
         if where != "claude":
             src += "; " + where + " install"
         if n in core:
             vd += "; CORE (always listed)"
-        rows.append(row(n, "vetted", fm.get("description", ""), sk.replace("\\", "/"), src, vd))
+        if status == "installed-unverified":
+            vd += "; no matching owner TRUST.json package manifest and provenance; do not use before review"
+        else:
+            vd += "; owner trust: %s %s" % (entry["kind"], entry["provenance"])
+        rows.append(row(n, status, fm.get("description", ""), sk.replace("\\", "/"), src, vd))
     taken = set(vetted)
     app, w2, app_names = app_rows(gate_path, taken)
     warn += w2
@@ -323,16 +391,17 @@ def build(simulate=None, gate_path=GATE):
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     head = [
         "# Skill INDEX (generated by build_index.py at %s; do not edit by hand)" % now,
-        "Find a skill: grep -i 2-4 task words in this file; NEVER Read it whole (about 1-2k tokens per grep). Then Read the SKILL.md at the path.",
+        "Find a skill: grep -i 2-4 task words. Read only vetted skills; installed-unverified skills require review first.",
         "Row: | name | status | description (200 chars) | path | source | verdict |",
-        "status vetted = installed and reviewed, or in-house: read and use it. status unvetted = catalogue metadata only, never installed:",
+        "status vetted = owner TRUST.json matches every package file. installed-unverified = review before use.",
+        "status unvetted = catalogue metadata only, never installed:",
         "  before using one, check REJECTED.md (same folder), then vet and install it (install_skill.py request, check, review, install) with --library <SKILL_LIBRARY>; never use an unvetted skill's files first.",
         "status rejected rows live in REJECTED.md so they do not drown a grep. Open source first: look for an existing tool before building one.",
         "Paths: a vetted row points at the live folder (<SKILLS_DIR>/<name>, or <SKILL_LIBRARY>/<name> for a library install).",
         "status app = app-managed (plugins, synced claude.ai skills, Codex .system, brain-managed shared skills): available natively; never hide, edit or reinstall.",
         "skill-library/_snapshot-*/ folders hold dated copies: never read, edit or cite a copy; write lessons into the skill at its row's path.",
         "Core (always listed in every session, %d): " % len(core) + ", ".join(sorted(core)),
-        "Rows: vetted=%d app=%d unvetted=%d (rejected=%d in REJECTED.md). Writers: build_index.py only; the feeder appends to catalogue.jsonl." % (len(rows), len(app), len(unv), len(rej)),
+        "Rows: vetted=%d installed-unverified=%d app=%d unvetted=%d (rejected=%d in REJECTED.md)." % (sum('| vetted |' in x for x in rows), sum('| installed-unverified |' in x for x in rows), len(app), len(unv), len(rej)),
         "",
     ]
     assert len(head) <= HEADER_LINES
@@ -355,12 +424,16 @@ def parse_index(text):
     return out
 
 
-def verify_name(text, name, expect_path):
+def verify_name(text, name, expect_path, must_exist=True):
+    """ok when name has exactly one row (any status) whose path is expect_path (and, if must_exist, that file exists).
+
+    "status" says which: vetted, or installed-unverified (installed, owner review pending)."""
     rr = parse_index(text).get(name, [])
-    vet = [p for s, p in rr if s == "vetted"]
-    ok = len(rr) == 1 and len(vet) == 1 and norm(vet[0]) == norm(expect_path) and os.path.isfile(vet[0])
-    return {"name": name, "rows": len(rr), "vetted_rows": len(vet), "path": vet[0] if vet else None,
-            "expected": expect_path.replace("\\", "/"), "path_exists": bool(vet) and os.path.isfile(vet[0]), "ok": ok}
+    status, path = rr[0] if len(rr) == 1 else (None, None)
+    exists = bool(path) and os.path.isfile(path)
+    ok = len(rr) == 1 and norm(path or "") == norm(expect_path) and (exists or not must_exist)
+    return {"name": name, "rows": len(rr), "status": status, "vetted_rows": sum(s == "vetted" for s, _ in rr),
+            "path": path, "expected": expect_path.replace("\\", "/"), "path_exists": exists, "ok": ok}
 
 
 def write(b):
@@ -417,26 +490,31 @@ def main():
         if not name or not os.path.isfile(os.path.join(d, "SKILL.md")):
             sys.exit("usage: --simulate-install <name>=<dir with SKILL.md>")
         b = build((name, d), gate_path)
-        res = verify_name(b["idx"], name, os.path.join(T.LIB, name, "SKILL.md"))
+        expected = os.path.join(T.LIB, name, "SKILL.md")
+        res = verify_name(b["idx"], name, expected, must_exist=False)  # the same check --after-install makes
         res["path_exists"] = "n/a (dry run: nothing installed)"
-        res["ok"] = res["rows"] == 1 and res["vetted_rows"] == 1 and norm(res["path"] or "") == norm(res["expected"])
         line = [l for l in b["idx"].splitlines() if l.startswith("| %s |" % name)]
         print(json.dumps({"dry_run": True, "wrote": False, "row": line, "check": res,
-                          "counts": {"vetted": len(b["rows"]), "app": len(b["app"]), "unvetted": len(b["unv"])},
+                          "counts": {"vetted": sum('| vetted |' in x for x in b['rows']),
+                                     "installed-unverified": sum('| installed-unverified |' in x for x in b['rows']),
+                                     "app": len(b["app"]), "unvetted": len(b["unv"])},
                           "warnings": b["warn"]}, indent=1))
         return 0 if res["ok"] else 4
     b = build(None, gate_path)
     for w in b["warn"]:
         print("WARN", w, file=sys.stderr)
     if not b["rows"] and "--allow-empty" not in sys.argv and has_skill_files(T.SRC):
-        print("ERROR: %s holds SKILL.md files but the build found 0 vetted rows; nothing was written. Check SKILLS_DIR and "
+        print("ERROR: %s holds SKILL.md files but the build found 0 skill rows; nothing was written. Check SKILLS_DIR and "
               "SKILL_LIBRARY, or pass --allow-empty if an empty INDEX is what you want." % T.SRC, file=sys.stderr)
         return 1
     if "--check" in sys.argv:
-        print("rows vetted=%d app=%d unvetted=%d rejected=%d bytes=%d/%d" % (len(b["rows"]), len(b["app"]), len(b["unv"]), len(b["rej"]), len(b["idx"]), len(b["rjx"])))
+        print("rows vetted=%d installed-unverified=%d app=%d unvetted=%d rejected=%d bytes=%d/%d" % (sum('| vetted |' in x for x in b['rows']), sum('| installed-unverified |' in x for x in b['rows']), len(b["app"]), len(b["unv"]), len(b["rej"]), len(b["idx"]), len(b["rjx"])))
         return 0
+    if not os.path.isdir(T.LIB):
+        print("ERROR: create SKILL_LIBRARY directory before writing: %s" % T.LIB, file=sys.stderr)
+        return 1
     write(b)
-    print("wrote INDEX.md (vetted=%d app=%d unvetted=%d) REJECTED.md (%d)" % (len(b["rows"]), len(b["app"]), len(b["unv"]), len(b["rej"])))
+    print("wrote INDEX.md (vetted=%d installed-unverified=%d app=%d unvetted=%d) REJECTED.md (%d)" % (sum('| vetted |' in x for x in b['rows']), sum('| installed-unverified |' in x for x in b['rows']), len(b["app"]), len(b["unv"]), len(b["rej"])))
     if after:
         if after not in b["vetted"]:
             print(json.dumps({"after_install": after, "ok": False, "why": "no skill folder named %s in the live skills folder or the skill library (copies do not count)" % after}))
