@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.5 (2026-11-05): follow-up review fixes
+
+- Desk questions only count as answered copies when they end with a complete answered marker. Mentions of earlier
+  answers inside an unanswered question no longer suppress its wake-up.
+- The animation checklist gate retains the selected master's item prompts, section placement and section 10
+  questions, and refuses duplicate item IDs. Hidden comments and code blocks do not count as checklist items.
+  Keep prompts on their checkbox lines and add evidence underneath; see the documented Markdown subset.
+- Built-in librarian delivery uses per-request locks and flushes output before writing shown markers. Blocked
+  output cannot hold up unrelated requests, and acknowledgement failures are reported. CLI recovery is prepared
+  before requests are published, covering on-time answers as well. A broken pipe leaves the answer available for retry.
+  Late-answer preview helpers do not move or acknowledge answers;
+  a crash between successful flush and acknowledgement can cause a duplicate, and the unshipped external finder
+  hook remains outside this delivery guarantee.
+- Regression checks cover the original failures, valid checklist copies, competing delivery and progress while a
+  different late answer is pending. Live desktop, model, GPU and animation acceptance remains separate.
+
 ## v0.1.4 (2026-11-05): review, routing and recovery fixes
 
 - The desk reader flushes its output before acknowledging messages, preserving unread work when output fails.

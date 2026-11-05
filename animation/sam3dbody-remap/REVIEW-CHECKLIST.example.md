@@ -11,7 +11,13 @@ How to fill a box (the gate enforces it):
   `see: <picture path> f<frames>: <what the picture shows at those frames>`
   and the picture must have been opened by you (the gate reads your transcript). A number is not a look.
 
-Use a separate indented `reason: why this does not apply` line for each `[-]` item. Quote paths containing spaces with backticks, single or double quotes.
+Use a separate `reason: why this does not apply` line for each `[-]` item, indented by two or three spaces; indent
+`see:` evidence the same way. Quote paths containing spaces with backticks, single or double quotes.
+Keep each box's wording and Markdown formatting exactly as in the master and in its original numbered section;
+change the mark and add indented evidence or reasons below it. Section 10 questions must also remain unchanged.
+Use the simple layout shown: complete prompts on checkbox lines with at most three leading spaces, outside HTML
+comments and fenced code. Multiline prompts and nested lists are unsupported; see the README for the parser limits.
+Raw HTML tags and declarations are unsupported; angle-bracket placeholders in single-line inline code are allowed.
 
 ## 1. Setup (numbers)
 - [ ] **1.1** The take, the SAM run folder and the blend reviewed are named at the top of this copy, with their dates.

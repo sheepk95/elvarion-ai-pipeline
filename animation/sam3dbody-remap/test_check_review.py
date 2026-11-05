@@ -24,6 +24,189 @@ class ReviewGateTests(unittest.TestCase):
         return subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), str(self.copy),
                                '--checklist', str(self.master), *args], capture_output=True, text=True)
 
+    def shipped_fixture(self):
+        self.master.write_text(SCRIPT.with_name('REVIEW-CHECKLIST.example.md').read_text(encoding='utf-8'), encoding='utf-8')
+        text = re.sub(r'^(\s*-\s*)\[ \](.*)$', r'\1[-]\2\n  reason: not applicable to this clip',
+                      self.master.read_text(encoding='utf-8'), flags=re.MULTILINE)
+        records = []
+        for n, item in enumerate(('2.2', '3.0', '3.1', '3.2')):
+            picture = self.dir / f'frame{n}.png'
+            picture.write_bytes(b'parser fixture, not an image')
+            records.append({'message': {'content': [{'type': 'tool_use', 'name': 'Read', 'input': {'file_path': str(picture)}}]}})
+            pattern = rf'(?m)^- \[-\] \*\*{re.escape(item)}\*\*([^\n]*)\n  reason: not applicable to this clip'
+            text, count = re.subn(pattern, lambda m: f'- [x] **{item}**{m.group(1)}\n  see: frame{n}.png f1: distinct body pose visible number {chr(97+n)*2}', text)
+            self.assertEqual(count, 1)
+        transcript = self.dir / 'session.jsonl'
+        transcript.write_text(''.join(json.dumps(record) + '\n' for record in records), encoding='utf-8')
+        return text, transcript
+
+    def test_shipped_prompts_are_required(self):
+        text, transcript = self.shipped_fixture()
+        stripped = re.sub(r'(?m)^(- \[[x-]\] \*\*\d+\.\d+[a-z]?\*\*).+$', r'\1', text)
+        self.copy.write_text(stripped, encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn('PROMPT', result.stdout)
+
+    def test_link_reference_titles_do_not_count_as_picture_evidence(self):
+        text, transcript = self.shipped_fixture()
+        hidden, count = re.subn(r'(?m)^  (see: frame(\d+)\.png f1:.*)$',
+                               lambda m: '\n  [hidden-frame' + m.group(2) + ']: /url "' + m.group(1) + '"', text)
+        self.assertEqual(4, count)
+        self.copy.write_text(hidden, encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn('NO_LOOK', result.stdout)
+
+    def test_multiline_reference_titles_cannot_hide_evidence_or_reasons(self):
+        text, transcript = self.shipped_fixture()
+        for kind in ('see', 'reason'):
+            with self.subTest(kind=kind):
+                pattern = r'(?m)^  (' + kind + r':.*)$'
+                hidden, count = re.subn(pattern, lambda m: '\n  [hidden-label]: /url "first\n  ' + m.group(1) + '\n  last"', text)
+                self.assertGreater(count, 0)
+                self.copy.write_text(hidden, encoding='utf-8')
+                result = self.run_gate('--transcript', str(transcript))
+                self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+
+    def test_shipped_copy_allows_marks_evidence_and_blank_signoff(self):
+        text, transcript = self.shipped_fixture()
+        text = re.sub(r'(?m)^- \[-\] (\*\*11\.[12]\*\*[^\n]*)\n  reason: not applicable to this clip',
+                      r'  - [ ] \1  ', text)
+        self.copy.write_text(text, encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        result = self.run_gate('--transcript', str(transcript), '--final', 'yes')
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn('BLANK 11.1', result.stdout)
+
+    def test_shipped_questions_are_required(self):
+        text, transcript = self.shipped_fixture()
+        questions = re.findall(r'(?m)^- \[-\] (.+\?)$', text)
+        self.assertEqual(3, len(questions))
+        self.copy.write_text(text.replace(questions[1], questions[0]).replace(questions[2], questions[0]), encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn('QUESTION', result.stdout)
+
+    def test_shipped_item_section_is_required(self):
+        text, transcript = self.shipped_fixture()
+        line = next(line for line in text.splitlines() if line.startswith('- [-] **1.1**'))
+        moved = text.replace(line + '\n  reason: not applicable to this clip\n', '')
+        moved += '\n' + line.replace('[-]', '[ ]') + '\n'
+        self.copy.write_text(moved, encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn('SECTION', result.stdout)
+
+    def test_duplicate_ids_are_rejected(self):
+        text, transcript = self.shipped_fixture()
+        line = next(line for line in text.splitlines() if line.startswith('- [-] **1.1**'))
+        self.copy.write_text(text + '\n' + line + '\n  reason: not applicable to this clip\n', encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn('DUPLICATE', result.stdout)
+
+    def test_hidden_item_and_question_do_not_count(self):
+        text, transcript = self.shipped_fixture()
+        item = next(line for line in text.splitlines() if line.startswith('- [-] **1.1**'))
+        question = '- [-] What would a person watching this clip say looks wrong first?'
+        reason = '\n  reason: not applicable to this clip'
+        for target in (item, question):
+            block = target + reason
+            for start, end in (('<!--\n', '\n-->'), ('```markdown\n', '\n```'), ('~~~\n', '\n~~~')):
+                with self.subTest(target=target, fence=start):
+                    self.copy.write_text(text.replace(block, start + block + end), encoding='utf-8')
+                    result = self.run_gate('--transcript', str(transcript))
+                    self.assertEqual(1, result.returncode, result.stdout)
+                    self.assertIn('MISSING' if target == item else 'QUESTION', result.stdout)
+            with self.subTest(target=target, fence='indented code'):
+                self.copy.write_text(text.replace(block, '\n'.join('    ' + line for line in block.splitlines())), encoding='utf-8')
+                result = self.run_gate('--transcript', str(transcript))
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn('MISSING' if target == item else 'QUESTION', result.stdout)
+
+    def test_hidden_section_heading_does_not_move_live_items(self):
+        text, transcript = self.shipped_fixture()
+        text = text.replace('## 1. Setup (numbers)', '## 1. Setup (numbers)\n```\n## 11. Fake sign-off\n```')
+        self.copy.write_text(text, encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_comment_hidden_reason_does_not_count(self):
+        text, transcript = self.shipped_fixture()
+        line = next(line for line in text.splitlines() if line.startswith('- [-] **1.1**'))
+        text = text.replace(line + '\n  reason: not applicable to this clip',
+                            line + '\n<!--\n  reason: not applicable to this clip\n-->')
+        self.copy.write_text(text, encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn('REASON 1.1', result.stdout)
+
+    def test_raw_html_containers_are_refused(self):
+        text, transcript = self.shipped_fixture()
+        line = next(line for line in text.splitlines() if line.startswith('- [-] **1.1**'))
+        block = line + '\n  reason: not applicable to this clip'
+        for opening, closing in (('<div hidden>', '</div>'), ('<pre>', '</pre>'),
+                                 ('<span style="display:none">', '</span>'), ('<style>', '</style>'),
+                                 ('<div\n hidden>', '</div>')):
+            with self.subTest(opening=opening):
+                self.copy.write_text(text.replace(block, opening + '\n' + block + '\n' + closing), encoding='utf-8')
+                result = self.run_gate('--transcript', str(transcript))
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn('HTML', result.stdout)
+
+    def test_raw_html_master_and_ambiguous_comment_are_refused(self):
+        text, transcript = self.shipped_fixture()
+        self.copy.write_text(text, encoding='utf-8')
+        self.master.write_text(self.master.read_text(encoding='utf-8') + '\n<div hidden>\n', encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn('unsupported raw HTML', result.stdout)
+        self.master.write_text(SCRIPT.with_name('REVIEW-CHECKLIST.example.md').read_text(encoding='utf-8'), encoding='utf-8')
+        self.copy.write_text(text + '\n`<!--`\n<div hidden>\n', encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn('HTML', result.stdout)
+
+    def test_nested_code_evidence_does_not_count(self):
+        text, transcript = self.shipped_fixture()
+        reason = '  reason: not applicable to this clip'
+        picture = '  see: frame0.png f1: distinct body pose visible number aa'
+        for original, code in ((reason, 'REASON 1.1'), (picture, 'NO_LOOK 2.2')):
+            for replacement in ('    ```\n    ' + original.strip() + '\n    ```',
+                                '      ' + original.strip()):
+                with self.subTest(evidence=code, replacement=replacement):
+                    self.copy.write_text(text.replace(original, replacement, 1), encoding='utf-8')
+                    result = self.run_gate('--transcript', str(transcript))
+                    self.assertEqual(1, result.returncode, result.stdout)
+                    self.assertIn(code, result.stdout)
+
+    def test_indented_box_and_relative_evidence(self):
+        text, transcript = self.shipped_fixture()
+        line = next(line for line in text.splitlines() if line.startswith('- [-] **1.1**'))
+        original = line + '\n  reason: not applicable to this clip'
+        indented = '   ' + line + '\n     reason: not applicable to this clip'
+        self.copy.write_text(text.replace(original, indented), encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(0, result.returncode, result.stdout)
+        fenced = '   ' + line + '\n     ```\n     reason: not applicable to this clip\n     ```'
+        self.copy.write_text(text.replace(original, fenced), encoding='utf-8')
+        result = self.run_gate('--transcript', str(transcript))
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertIn('REASON 1.1', result.stdout)
+
+    def test_html_declarations_are_refused(self):
+        text, transcript = self.shipped_fixture()
+        line = next(line for line in text.splitlines() if line.startswith('- [-] **1.1**'))
+        block = line + '\n  reason: not applicable to this clip'
+        for opening, closing in (('<![CDATA[', ']]>'), ('<!DOCTYPE html [', ']>'), ('<?hidden', '?>')):
+            with self.subTest(opening=opening):
+                self.copy.write_text(text.replace(block, opening + '\n' + block + '\n' + closing), encoding='utf-8')
+                result = self.run_gate('--transcript', str(transcript))
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn('HTML', result.stdout)
+
     def test_all_not_applicable_is_not_a_visual_review(self):
         self.copy.write_text('## 2. Body\n- [-] 2.2 body\n  reason: not applicable to clip\n- [-] 3.1 pose\n  reason: not applicable to clip\n', encoding='utf-8')
         result = self.run_gate()

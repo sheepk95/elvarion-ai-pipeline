@@ -58,7 +58,8 @@ human has answered, the answer in the human's words. It also messages the answer
 - **An answer in `QUEUE.md` counts**, whether or not a message arrived. A chat that resumes after a pause looks for its
   session id in the queue before it carries on.
 - When a lane copies a question that already has an answer, it ends the line with `(answered DQ-nnn)` so the watcher
-  does not wake the desk chat for it again.
+  does not wake the desk chat for it again. Only a complete suffix is recognized; ordinary mentions of "answered"
+  still wake the desk. The older `(answered: explanation)` suffix is also accepted for existing copied questions.
 - Rulings the desk chat makes itself are marked as the desk chat's rulings, never recorded as the human's decisions.
 
 ## One rule for the lanes
