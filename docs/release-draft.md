@@ -9,7 +9,7 @@ Suggested description:
 
 Suggested topics: `ai-agents`, `agent-workflow`, `python`, `windows`, `game-development`, `claude-code`.
 
-Suggested first tagged release: `v0.1.1`, titled **Experimental Windows starter kit — reliability fixes**.
+Suggested first tagged release: `v0.1.2`, titled **Experimental Windows starter kit — reliability fixes**.
 Use the actual accepted commit when creating the tag; do not tag the original reviewed snapshot by mistake.
 
 Proposed release notes:

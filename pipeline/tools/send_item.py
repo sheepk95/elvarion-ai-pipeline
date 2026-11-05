@@ -25,8 +25,11 @@ g.add_argument("--body-file")
 a = ap.parse_args()
 if not re.fullmatch(r"[A-Za-z0-9 ._-]+", a.frm) or ".." in a.frm:    # --from becomes part of a file name
     sys.exit(f"ERROR: --from {a.frm!r}: use letters, digits, space, dot, dash and underscore only, and no '..'")
-if any(c in a.refs for c in "\r\n\x00"):   # --refs is one header line; a line break could forge another header
-    sys.exit("ERROR: --refs must be a single line (no line breaks)")
+# --refs is one header line; a line break could forge another header. Readers split with str.splitlines(), which also
+# breaks on \v \f \x1c-\x1e \x85 U+2028 U+2029, so refuse any separator splitlines() knows (the appended "x" makes a
+# trailing one split too), and NUL.
+if len((a.refs + "x").splitlines()) != 1 or "\x00" in a.refs:
+    sys.exit("ERROR: --refs must be a single line (no line breaks or line separators, no NUL)")
 if not os.path.isabs(a.to):     # a relative --to is relative to the pipeline root (parent of tools/), not the cwd
     a.to = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), a.to)
 if not os.path.isdir(a.to):
@@ -51,6 +54,8 @@ while True:
         except FileExistsError:
             n += 1
             continue
+        except OSError as e:    # e.g. FAT or some network drives: no hard links, so nothing can be published here
+            sys.exit(f"ERROR: cannot publish into {a.to} ({e}); the inbox needs a filesystem with hard links")
         break
     finally:
         try:

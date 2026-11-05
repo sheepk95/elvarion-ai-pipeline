@@ -174,6 +174,24 @@ class RunnerRefusesBeforeLoad(unittest.TestCase):
         self.assertIn("REFUSED", err)
         self.assertEqual(self.blocker.seen, [], "a heavy module was imported before the refusal")
 
+    def test_each_missing_file_refused_with_exit_2_before_any_heavy_import(self):
+        for rel in FIXTURE:  # every file the runner needs; the runner checks some of them before verify() runs
+            with self.subTest(missing=rel):
+                path = self.root / rel
+                path.unlink()
+                self.blocker.seen.clear()
+                try:
+                    for extra in ((), ("--trust-unverified-checkpoint",)) if rel != "LICENSE" else ((),):
+                        code, out, err = self.main(*extra)
+                        self.assertEqual(code, 2, (extra, out + err))
+                        # the runner's own check names the file on stderr; verify() lists it on stdout and refuses
+                        self.assertRegex(out + err, r"MISSING.*" + Path(rel).name, (extra, out, err))
+                        if rel != "LICENSE":
+                            self.assertIn("MISSING checkpoint file", err, (extra, out, err))
+                        self.assertEqual(self.blocker.seen, [], "a heavy module was imported before the refusal")
+                finally:
+                    path.write_bytes(FIXTURE[rel])
+
     def test_good_checkpoint_reaches_the_runtime(self):
         code, out, err = self.main()
         self.assertTrue(str(code).startswith("import:"), (code, out, err))

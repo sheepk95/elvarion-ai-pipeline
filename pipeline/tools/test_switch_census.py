@@ -21,13 +21,79 @@ class Census(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.t, ignore_errors=True)
 
-    def run_census(self, localappdata):
+    def run_census(self, localappdata, *args):
         env = dict(os.environ)
         env.pop('LOCALAPPDATA', None)
         if localappdata is not None:
             env['LOCALAPPDATA'] = str(localappdata)
-        return subprocess.run([sys.executable, '-I', '-B', str(self.root / 'tools' / 'switch_census.py')],
+        return subprocess.run([sys.executable, '-I', '-B', str(self.root / 'tools' / 'switch_census.py'), *args],
                               capture_output=True, text=True, env=env, timeout=60)
+
+    def good_chat(self):
+        (self.pair / 'local_good.json').write_text(
+            '{"title": "Coordinator", "cwd": "%s"}' % str(self.root).replace('\\', '\\\\'), encoding='utf-8')
+
+    def assert_good_chat_listed(self, p):
+        self.assertEqual(0, p.returncode, p.stdout + p.stderr)
+        self.assertNotIn('Traceback', p.stderr)
+        self.assertRegex(p.stdout, r'Coordinator\s+local_good\s')
+
+    def test_structurally_damaged_session_files_are_skipped_and_named(self):
+        self.good_chat()
+        bad = {'local_null': 'null', 'local_list': '[]', 'local_num': '7',
+               'local_title_list': '{"title": ["x"], "cwd": "%s"}' % str(self.root).replace('\\', '\\\\'),
+               'local_cwd_num': '{"title": "Other", "cwd": 5}'}
+        for name, text in bad.items():
+            (self.pair / (name + '.json')).write_text(text, encoding='utf-8')
+        p = self.run_census(self.t / 'la')
+        self.assert_good_chat_listed(p)
+        for name in bad:
+            self.assertRegex(p.stdout, r'skipped unreadable session file .*%s\.json' % name)
+
+    def test_damaged_archive_index_warns_and_lists_chats(self):
+        self.good_chat()
+        for text in ('{', '[]', '{"other": 1}', '{"archived": 5}', '{"archived": [{"a": 1}]}', 'null'):
+            with self.subTest(text=text):
+                (self.pair / 'archived-sessions.idx').write_text(text, encoding='utf-8')
+                p = self.run_census(self.t / 'la')
+                self.assert_good_chat_listed(p)
+                self.assertIn('archived-sessions.idx unreadable', p.stdout)
+        (self.pair / 'archived-sessions.idx').write_text('{"archived": ["local_good"]}', encoding='utf-8')
+        p = self.run_census(self.t / 'la')        # control: a good index still hides an archived chat
+        self.assertEqual(0, p.returncode, p.stderr)
+        self.assertNotIn('local_good', p.stdout)
+
+    def test_damaged_account_pairs_file_warns_and_lists_chats(self):
+        self.good_chat()
+        amap = self.t / 'pairs.json'
+        for text in ('{', '[]', '"acct"', '{"a@example.invalid": 5}'):
+            with self.subTest(text=text):
+                amap.write_text(text, encoding='utf-8')
+                p = self.run_census(self.t / 'la', '--account-pairs', str(amap))
+                self.assert_good_chat_listed(p)
+                self.assertIn('--account-pairs %s unreadable' % amap, p.stdout)
+
+    def test_platform_check_comes_before_ctypes_import(self):
+        # Off Windows the friendly message must show even if ctypes.wintypes cannot load: run the census with
+        # os.name faked to posix and every ctypes import failing.
+        runner = self.t / 'posix_runner.py'
+        runner.write_text(
+            "import argparse, builtins, glob, json, os, re, runpy, shutil, sys, time  # load before os.name is faked\n"
+            "real = builtins.__import__\n"
+            "def imp(name, *a, **kw):\n"
+            "    if name == 'ctypes' or name.startswith('ctypes.'):\n"
+            "        raise ImportError('no ctypes here')\n"
+            "    return real(name, *a, **kw)\n"
+            "builtins.__import__ = imp\n"
+            "os.name = 'posix'\n"
+            "script = sys.argv[1]\n"
+            "sys.argv = [script]\n"
+            "runpy.run_path(script, run_name='__main__')\n", encoding='utf-8')
+        p = subprocess.run([sys.executable, '-I', '-B', str(runner), str(self.root / 'tools' / 'switch_census.py')],
+                           capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(0, p.returncode)
+        self.assertIn('Windows and the Claude desktop app only', p.stderr)
+        self.assertNotIn('Traceback', p.stderr)
 
     def test_no_localappdata(self):
         p = self.run_census(None)

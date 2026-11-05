@@ -211,13 +211,102 @@ class SafetyTests(unittest.TestCase):
         self.assertIn('nvidia-smi', err)
         self.assertNotIn('job was launched', err)
 
+    def fake_clock(self):
+        """Replace the module's clock with one that moves only when claim sleeps; returns the sleep patch."""
+        clock = [time.time()]
+        self.m.now = lambda: clock[0]
+        def sleep(s):
+            clock[0] += s
+        return mock.patch.object(self.m.time, 'sleep', sleep)
+
     def test_telemetry_failure_cleans_up_existing_wait_ticket(self):
-        checks = iter(({}, None))
-        self.m.processes = lambda: next(checks)
+        # First poll: busy, so a queue ticket is written. Every later poll: no process telemetry until the
+        # deadline, which must raise and still remove the ticket. The clock moves only in sleep, so a slow
+        # first poll cannot reach the deadline early.
+        calls = []
+        def procs():
+            calls.append(1)
+            return {} if len(calls) == 1 else None
+        self.m.processes = procs
         self.m.blockers = lambda *args: 'busy'
-        with self.assertRaisesRegex(RuntimeError, 'process enumeration'):
-            self.m.claim(self.args(wait=0.1), 0)
+        with self.fake_clock():
+            with self.assertRaisesRegex(RuntimeError, 'process enumeration'):
+                self.m.claim(self.args(wait=30), 0)
+        self.assertGreater(len(calls), 1, 'claim must have polled again after the busy answer')
         self.assertEqual(list((self.m.ROOT / 'queue').glob('*.json')), [])
+
+    def test_wait_survives_one_telemetry_blip(self):
+        checks = iter((None, {}))
+        self.m.processes = lambda: next(checks)
+        with mock.patch.object(self.m.time, 'sleep', lambda s: None):
+            lease, why = self.m.claim(self.args(wait=30), os.getpid())
+        self.assertIsNotNone(lease, 'one failed process scan while waiting must not abort the wait: %s' % why)
+        self.assertEqual(list((self.m.ROOT / 'queue').glob('*.json')), [], 'the ticket closes when the lease opens')
+
+    def test_wait_blip_keeps_the_queue_ticket(self):
+        state = {'n': 0, 'queued': None}
+        def procs():
+            state['n'] += 1
+            if state['n'] == 2:  # second poll: the first poll's blip must have left this claim's ticket in line
+                state['queued'] = [p.name for p in (self.m.ROOT / 'queue').glob('*.json')]
+            return None if state['n'] == 1 else {}
+        self.m.processes = procs
+        with mock.patch.object(self.m.time, 'sleep', lambda s: None):
+            lease, why = self.m.claim(self.args(wait=30), os.getpid())
+        self.assertIsNotNone(lease, why)
+        self.assertEqual(['%s.json' % lease['id']], state['queued'])
+
+    def test_off_windows_refuses_at_once_naming_the_platform(self):
+        self.m.PROCESS_SCAN = False
+        self.m.processes = lambda: None
+        slept = []
+        with mock.patch.object(self.m.time, 'sleep', lambda s: slept.append(s)):
+            with self.assertRaisesRegex(RuntimeError, 'Windows-only'):
+                self.m.claim(self.args(wait=30), 0)
+        self.assertEqual([], slept, 'process enumeration never works off Windows: do not wait for it')
+        self.assertEqual(list((self.m.ROOT / 'queue').glob('*.json')), [])
+
+    def test_wait_ticket_records_the_start_time(self):
+        self.m.blockers = lambda *args: 'busy'
+        seen, real = [], self.m.write_json
+        def spy(kind, lid, data):
+            if kind == 'queue':
+                seen.append(dict(data))
+            return real(kind, lid, data)
+        self.m.write_json = spy
+        with self.fake_clock():
+            lease, _ = self.m.claim(self.args(wait=0.05), os.getpid())
+        self.assertIsNone(lease)
+        self.assertTrue(seen, 'a --wait claim must write a queue ticket')
+        self.assertIsNotNone(seen[0].get('pid_started'), 'the ticket must carry a start time')
+        self.assertEqual(self.m.pid_started(os.getpid()), seen[0].get('pid_started'))
+
+    def test_run_keeps_exit_code_when_release_cannot_lock(self):
+        self.m.claim = lambda a, pid: (dict(id='L1', what='w'), None)
+        self.m.renew = lambda *a: {}
+        def no_lock(*a):
+            raise RuntimeError('could not get lock')
+        self.m.release = no_lock
+        with mock.patch('sys.stdout', new_callable=__import__('io').StringIO) as output:
+            code = self.m.run(self.args(), [sys.executable, '-c', 'raise SystemExit(5)'])
+        self.assertEqual(5, code)
+        self.assertIn('NOT closed', output.getvalue())
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows process enumeration')
+    def test_lock_wait_outlasts_two_telemetry_samples(self):
+        # A claim holds the ledger lock while it samples both telemetry commands; two claimants in a row must
+        # not be able to time out a third client that is waiting for the lock.
+        timeouts = []
+        def fake_run(cmd, **kw):
+            timeouts.append(kw.get('timeout'))
+            return subprocess.CompletedProcess(cmd, 1, b'')
+        fresh = module(self.root)
+        with mock.patch.object(fresh.subprocess, 'run', side_effect=fake_run):
+            fresh.processes()
+            fresh.gpu_free_gb()
+        self.assertEqual(2, len(timeouts), timeouts)
+        self.assertTrue(all(isinstance(t, (int, float)) and t > 0 for t in timeouts), timeouts)
+        self.assertGreater(fresh.LOCK_WAIT_S, 2 * sum(timeouts))
 
     def test_bad_gpu_output_is_unavailable(self):
         cases = [(1, b'0, 24576'), (0, b'nan, 24576'), (0, b'not a number'),

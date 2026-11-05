@@ -75,9 +75,12 @@ measure (`torch.cuda.max_memory_allocated()`) and add 1 GB. Unsure: book high, t
 - No open exclusive lease; an exclusive claim needs nothing else open.
 - Booked GB + recognised unbooked programs + yours is within the budget, and `nvidia-smi` shows your GB plus 0.5 GB free.
 - Process enumeration and free-memory telemetry must both succeed. Admission fails closed if either is unavailable;
-  process enumeration currently requires Windows and PowerShell/CIM.
+  process enumeration currently requires Windows and PowerShell/CIM (elsewhere a claim is refused at once). With
+  `--wait`, a failed sample counts as busy ("telemetry unavailable: ..."): the claim keeps its place in the queue and
+  polls again, and exits 1 only if telemetry is still missing at the deadline.
 - Admission samples telemetry after taking the ledger lock, so it does not reuse a snapshot from before a lock wait.
-  The telemetry commands have bounded timeouts; other ledger clients may wait while they finish. This remains a
+  A claim therefore holds the ledger lock for one telemetry sample (PowerShell/CIM, timeout 30 s, plus `nvidia-smi`,
+  timeout 15 s); other ledger clients wait up to 120 s for the lock, longer than two such samples back to back. This remains a
   cooperative protocol: an unbooked process can start after any snapshot, so every participating launcher must book.
 - Nobody is ahead of you in the queue.
 - Legacy flag files (`GPU_HEAVY`, an unexpired `UNITY_PRIORITY` written by another tool) count as someone else's
@@ -91,12 +94,14 @@ measure (`torch.cuda.max_memory_allocated()`) and add 1 GB. Unsure: book high, t
 
 ## Traps
 
-- On Windows a rename or delete fails while any process has the file open. The tool retries for a few seconds and never
-  crashes or leaves a flag behind.
+- On Windows a rename or delete fails while any process has the file open. Permission failures are retried for up to
+  three seconds. An unsuccessful operation reports an error or warning; a retained flag may require a later release or
+  reap attempt.
 - A Git-for-Windows program in front of a GPU program (`timeout`, `env`, `bash other.sh`) can break the process tree,
   so the GPU program shows as SEEN while your lease is open. For a time limit inside a booked script use
   `scripts/lease_timeout.py <seconds> <command> [args...]`, a plain Python wrapper that keeps the chain.
-- A killed `run` wrapper leaves its child running unbooked once the 5-minute heartbeat lapses.
+- Killing a `run` wrapper can leave its child running. The next ledger operation can reap the booking when the wrapper
+  PID is dead; heartbeat expiry is another cleanup path. Either way the child then runs unbooked.
 
 ## Proof
 

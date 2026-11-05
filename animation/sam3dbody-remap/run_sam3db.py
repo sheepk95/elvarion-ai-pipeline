@@ -150,7 +150,8 @@ def main():
     ck = Path(a.ckpt_dir)
     for f in ("model.ckpt", "model_config.yaml", "assets/mhr_model.pt"):
         if not (ck / f).exists():
-            sys.exit(f"MISSING checkpoint file {ck / f} (gated Hugging Face repo facebook/sam-3d-body-vith)")
+            print(f"MISSING checkpoint file {ck / f} (gated Hugging Face repo facebook/sam-3d-body-vith)", file=sys.stderr)
+            sys.exit(2)  # the same exit as any other checkpoint refusal (README, docstring)
     verified = check_checkpoint(ck, a.trust_unverified)  # before torch, cv2 or Meta's code is imported
     load_runtime()
     # Read the boxes before the model loads: a bad --boxes or an empty --boxes-json stops

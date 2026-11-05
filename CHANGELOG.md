@@ -1,15 +1,65 @@
 # Changelog
 
-## v0.1.1 (unreleased): reliability fixes from three independent reviews
+## v0.1.2 (unreleased): fixes from two independent reviews of v0.1.1
 
-Everything below is covered by `python -I -B tools/run_checks.py` (Windows, CPU only). Each new guard was shown to
-fail on the v0.1 code, or with the fix removed, before it was accepted.
+A Codex CLI review (GPT-6 Astra, extra-high) and a fresh Opus 5.5 review (extra-high) both rated v0.1.1 ready at
+7.5/10, with no blocker or major defects. This version fixes every minor defect and improvement they reported. Each
+behaviour fix has a test that fails on v0.1.1 and passes here.
+
+### Job pins
+- A REVIEW, TEST or GATE record that holds a different pins line anywhere in the file is refused (exit 2), not only
+  in its first five lines.
+- A dirty-worktree refusal names the first changed paths and warns against `git clean` on proof media; the checker's
+  git calls use `--no-optional-locks`, so it never takes the index lock from a builder.
+- When a scoped re-gate does not accept an older TEST, a NOTE line says which condition failed. A READY mismatch is
+  printed once. Exit 2 for a dirty worktree is documented, as is the `tester not re-run: <why>` line a scoped re-gate
+  needs (GATE-BRIEF.md, RULES.md, tools/README.md).
+
+### Inbox and census
+- `--refs` is refused when any line separator Python's `splitlines()` knows (not only CR and LF) or NUL is in it.
+  A filesystem without hard links gives one clear error and leaves no item or temporary file.
+- `switch_census.py` warns and carries on for a damaged `archived-sessions.idx`, a damaged `--account-pairs` file, or
+  a session file that is not a JSON object or has the wrong field types. Its Windows-only message shows even where
+  `ctypes` cannot load.
+
+### GPU lease
+- The ledger lock wait is 120 s, more than two telemetry samples at their timeouts; a claim holds the lock for one
+  sample. `run` returns its job's exit code even when the final release cannot get the lock.
+- With `--wait`, a telemetry failure before the deadline counts as "busy" and keeps the queue place; without
+  `--wait`, or at the deadline, it is still refused. Off Windows a claim refuses at once and says process scanning is
+  Windows-only.
+- SKILL.md no longer promises that a flag is never left behind or that a killed wrapper's job stays booked for five
+  minutes.
+
+### Librarian
+- `--simulate-install` checks TRUST.json against the candidate folder's files, so it predicts the row the real install
+  gets. `--after-install` passes for one row at the expected path whatever its status and reports that status
+  (`installed-unverified` means review pending), so a fresh install no longer fails.
+- Heartbeat times that are huge, infinite, NaN or far in the future count as unreadable everywhere (status, freshness,
+  asks). A blank TRUST provenance never counts as approval. The README says the catalogue's trust is a build-time
+  snapshot: editing a package or revoking trust needs an INDEX rebuild.
+
+### Animation kit
+- A missing checkpoint file exits 2 like every other checkpoint refusal (it exited 1).
+
+### Tests
+- New guards for each item above, including mutants the reviewers showed were unguarded in v0.1.1 (first-pin-only
+  scan, scoped header end anchor, queue-ticket start time, blank provenance). The wait-ticket cleanup test no longer
+  depends on timing.
+
+## v0.1.1: reliability fixes from three independent reviews
+
+The CPU-only checks in `tools/run_checks.py` cover the behaviours their suites exercise (each suite is listed in
+`SUITES` there). Each new guard was shown to fail on the v0.1 code, or with the fix removed, before it was accepted.
+The pinned animation install (`PINNED=1`) and everything under "Not covered by the checks" below are not exercised
+by those suites.
 
 ### Job pins (`pipeline/tools/job_pins.py`)
 - `--check` now requires REVIEW, TEST and GATE records (a missing review used to pass) and compares each record's
   full card, scorecard and work pins with the gate, not only the work pin.
-- A scoped re-gate may reuse an older TEST only when its whole pins line matches the earlier gate it names, and its
-  card and scorecard still match the current gate. A file holding two different pins lines is rejected.
+- A scoped re-gate may reuse an older TEST only when its whole pins line matches the earlier gate it names, the gate
+  says `tester not re-run: <why>`, and the TEST's card and scorecard still match the current gate. A record holding
+  two different pins lines in its first five lines is rejected (v0.1.2 extends this to the whole record).
 - A current code-work pin refuses a worktree with tracked or untracked (non-ignored) changes.
 - The success line no longer says "merge": matching pins are not a gate PASS or the owner's GO.
 

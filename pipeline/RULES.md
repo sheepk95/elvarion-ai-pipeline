@@ -35,7 +35,7 @@ folder holding this file). Where a card, a hand-over note or an old item disagre
   since the sender looked: read what changed first. Before merge, `job_pins.py <job> --check` compares the current
   identity with the REVIEW, TEST and GATE records. Current commit pins require a clean worktree. An explicitly named
   scoped re-gate can reuse older TEST work only when its card/scorecard match the current gate and its entire tuple
-  matches that earlier gate. Identity checks do not establish a PASS verdict or the owner's permission: read those
+  matches that earlier gate, and the gate file holds a `tester not re-run: <why>` line. Identity checks do not establish a PASS verdict or the owner's permission: read those
   separately, keep source fixed during verification, and merge the exact accepted commit.
 
 ## Account switch

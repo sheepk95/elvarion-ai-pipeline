@@ -58,7 +58,7 @@ Commands:
                             rebuilt after you read them are never marked loaded.
   status                    heartbeat age, pending, claimed, answered, rollover
 """
-import argparse, glob, hashlib, json, os, re, secrets, sys, time
+import argparse, glob, hashlib, json, math, os, re, secrets, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.environ.get("LIBRARIAN_ROOT") or HERE  # folder holding mailbox/ and catalogue/ (default: beside this file)
@@ -291,6 +291,29 @@ def mark_timeout(mb, rid):
         pass
 
 
+FUTURE_SKEW_S = 300  # a heartbeat time this far ahead of the clock is not a real write (the writer uses this clock)
+
+
+def finite_epoch(value):
+    """value as a finite float, or None when it cannot be one: missing, text, NaN, +/-infinity, or an integer too big
+    for a float (JSON allows all of these). The one parser for every heartbeat time that feeds status or freshness."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def heartbeat_age(hb, key="epoch"):
+    """Seconds since hb[key] (a missing key counts as epoch 0, very old), or None when that time is unreadable or lies
+    more than FUTURE_SKEW_S in the future: an unreadable time must never pass as a fresh heartbeat."""
+    t = finite_epoch(hb.get(key, 0))
+    if t is None:
+        return None
+    age = time.time() - t
+    return age if math.isfinite(age) and age >= -FUTURE_SKEW_S else None
+
+
 def heartbeat_problem(mb, stale_s=STALE_S):
     """None when the librarian looks alive and loaded, else a short reason (used by ask_librarian.py)."""
     hb = read_json(hb_path(mb))
@@ -300,18 +323,17 @@ def heartbeat_problem(mb, stale_s=STALE_S):
         return "heartbeat unreadable"
     if not hb.get("loaded"):
         return "librarian not loaded"
-    try:
-        age = time.time() - float(hb.get("epoch", 0))
-    except (TypeError, ValueError):
+    age = heartbeat_age(hb)
+    if age is None:
         return "heartbeat unreadable"
     if age > stale_s:
         return "heartbeat %d min old" % (age // 60)
     lt = read_json(os.path.join(mb, "last_timeout.json"))
-    try:
-        if lt and float(lt.get("epoch", 0)) > float(hb.get("session_active_epoch", 0) or 0):
+    if isinstance(lt, dict) and lt:
+        timed_out = finite_epoch(lt.get("epoch", 0))
+        active = finite_epoch(hb.get("session_active_epoch", 0) or 0)
+        if timed_out is not None and active is not None and timed_out > active:
             return "an ask timed out at %s and the librarian has not run since" % lt.get("utc", "?")
-    except (TypeError, ValueError):
-        pass
     if hb.get("last_event") == "wake_requests" and age > WAKE_STALL_S:
         return "librarian woke on requests %d s ago and has not answered" % age
     return None
@@ -339,13 +361,10 @@ def librarian_asleep(mb, quiet_s=None):
     hb = read_json(hb_path(mb))
     if not isinstance(hb, dict):
         return None  # no librarian has ever run in this mailbox: there is no chat to wake
-    try:
-        age = time.time() - float(hb.get("epoch", 0))
-    except (TypeError, ValueError):
-        age = float("inf")
-    if age < quiet_s:
+    age = heartbeat_age(hb)
+    if age is not None and age < quiet_s:
         return None
-    if age == float("inf"):
+    if age is None:
         silent = "ever (unreadable heartbeat time)"
     else:
         silent = "%d s" % age if age < 120 else "%d min" % (age // 60)
@@ -1083,10 +1102,11 @@ def status_lines(mb):
         hb = None
     else:
         # A hand-edited or half-migrated heartbeat must not crash `status`: heartbeat_problem guards the same fields.
-        try:
-            age_txt = "%dm%02ds" % divmod(int(time.time() - float(hb.get("epoch", 0))), 60)
-        except (TypeError, ValueError, OverflowError):
-            age_txt = "unreadable (epoch %r)" % (hb.get("epoch"),)
+        age = heartbeat_age(hb)
+        if age is None:
+            age_txt = "unreadable (epoch %s)" % one_line(repr(hb.get("epoch")))
+        else:
+            age_txt = "%dm%02ds" % divmod(int(age), 60)
         try:
             this_session = int(hb.get("requests_answered", 0)) - int(hb.get("session_answered_base", 0))
         except (TypeError, ValueError, OverflowError):

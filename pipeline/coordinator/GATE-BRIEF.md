@@ -48,7 +48,8 @@ verdict informs and decides nothing. A scoped re-gate gets no twin.
 
 ## Scoped re-gate
 You are a scoped re-gate if your prompt says so. Line 1 of your file is `SCOPED RE-GATE of GATE-<n-1>`; the pins line
-is in the top 5 lines. Your inputs: the failed GATE file, `FIXES-<n>-gate.md`, the newest REVIEW file, the fix diff,
+is in the top 5 lines. If the tester is not re-run, write the line `tester not re-run: <why>` in the first 2000
+characters of your file; without it `job_pins.py <job> --check` reports the older TEST as a mismatch (exit 1). Your inputs: the failed GATE file, `FIXES-<n>-gate.md`, the newest REVIEW file, the fix diff,
 the job card and the tests.
 1. Write the criteria first, as in step 1.
 2. Write your OWN impact list before you read the builder's `Impact:` lines: for code, callers and users of each

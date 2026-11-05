@@ -98,6 +98,19 @@ Any file addition, deletion or edit invalidates it until reviewed again. Do not 
 to silence a mismatch. External dependencies and referenced files outside the package still require their own review;
 this manifest is an identity check, not a sandbox or proof that execution is safe.
 
+Trust in the catalogue is a build-time snapshot. `build_index.py` checks every manifest when it writes `INDEX.md`;
+`librarian_inbox.py catalogue-check` and a catalogue refresh (`build_full_catalogue.py`) trust the labels already in
+that INDEX and watch only `SKILL.md` size and time. After a package edit (a helper script included) or a revoked or
+changed `TRUST.json` entry, the owner must rebuild the INDEX with `build_index.py` before the change reaches the
+librarian; a catalogue refresh alone does not re-validate anything.
+
+The installer runs `build_index.py --after-install <name>` right after installing. It rebuilds the INDEX and exits 0
+when that name has exactly one row whose path is its installed `SKILL.md`, whatever the status; the JSON it prints
+says which (`"status": "installed-unverified"` means installed, owner review pending). It exits 4 for no row, two or
+more rows, or a row at another path. `--simulate-install <name>=<dir>` makes the same check on the row an install
+would get: it hashes the candidate folder `<dir>` against `TRUST.json`, shows the projected destination path, and
+creates nothing.
+
 ## Safety notes
 
 - **`build_index.py` without `--check` replaces `INDEX.md` and `REJECTED.md`** in `SKILL_LIBRARY`. Try it on a scratch
@@ -115,7 +128,8 @@ this manifest is an identity check, not a sandbox or proof that execution is saf
 - The upstream automated test file for the mailbox (`test_librarian.py`, about 200 KB) is not shipped. A smaller one
   is: `librarian/test_librarian_inbox.py` runs the round trip in a temporary mailbox (a heartbeat, a request filed by
   `ask_librarian.py`, `list` claiming it, an answer file, the asker receiving it), plus a request file with a bad id
-  and a heartbeat with a non-numeric epoch (`status` must not crash).
+  and heartbeats with damaged epochs (non-numeric, too large for a float, infinite, NaN): both status commands must
+  report them as unreadable without crashing, and an ask must fall back without filing a request.
 
 Run `python -I -B librarian/test_build_index.py` from the repository root for isolated trust, package-change and
 missing-directory checks, and `python -I -B librarian/test_librarian_inbox.py` for the mailbox. These fixtures do not

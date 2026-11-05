@@ -21,14 +21,12 @@ Usage: python -I -B switch_census.py [--root <pipeline root; default = the paren
   WAKE lines printed.
 """
 import argparse
-import ctypes
 import glob
 import json
 import os
 import re
 import sys
 import time
-from ctypes import wintypes
 
 ITEM = re.compile(r"^\d{8}T\d{6}Z-.+-\d+\.md$")
 ap = argparse.ArgumentParser()
@@ -40,6 +38,8 @@ a = ap.parse_args()
 if os.name != "nt":
     sys.exit("switch_census.py: Windows and the Claude desktop app only (it reads the app's session folder and "
              "checks waiter processes with Windows APIs); wake CLI chats by hand")
+import ctypes                       # after the platform check, so the message above always shows
+from ctypes import wintypes
 CWD_MARKER = a.cwd_marker or os.path.basename(os.path.normpath(a.root))
 
 
@@ -63,9 +63,11 @@ def waiter(inbox):
     if not os.path.exists(p):
         return "NONE"
     try:
-        return "ARMED" if alive(int(open(p).read().strip())) else "DEAD"
-    except ValueError:
+        with open(p) as fh:
+            pid = int(fh.read().strip())
+    except (OSError, ValueError):       # the waiter may delete it between exists and open
         return "DEAD"
+    return "ARMED" if alive(pid) else "DEAD"
 
 
 def sessions():
@@ -80,18 +82,41 @@ def sessions():
     if not pairs:
         return {}, "(no session pair holds any chat)"
     amap_p = a.account_pairs
-    amap = json.load(open(amap_p, encoding="utf-8")) if amap_p and os.path.exists(amap_p) else {}
+    amap = {}
+    if amap_p and os.path.exists(amap_p):
+        try:
+            with open(amap_p, encoding="utf-8-sig") as fh:
+                amap = json.load(fh)
+            if not isinstance(amap, dict) or not all(isinstance(v, str) for v in amap.values()):
+                raise ValueError("not a JSON object of e-mail -> folder name strings")
+        except (OSError, ValueError) as e:
+            print("WARNING: --account-pairs %s unreadable (%s); ignoring it" % (amap_p, e))
+            amap = {}
     email = os.environ.get("CLAUDE_CODE_USER_EMAIL", "")
     pair = next((d for d in pairs if email in amap and os.path.normpath(d).endswith(os.path.normpath(amap[email]))), None)
     pair = pair or max(pairs, key=lambda d: max(os.path.getmtime(f) for f in glob.glob(os.path.join(d, "local_*.json"))))
     idx_p = os.path.join(pair, "archived-sessions.idx")
-    arch = set(json.loads(open(idx_p, encoding="utf-8-sig").read())["archived"]) if os.path.exists(idx_p) else set()
+    arch = set()
+    if os.path.exists(idx_p):
+        try:
+            with open(idx_p, encoding="utf-8-sig") as fh:
+                listed = json.load(fh)["archived"]
+            if not isinstance(listed, list) or not all(isinstance(x, str) for x in listed):
+                raise ValueError("'archived' is not a list of session ids")
+            arch = set(listed)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            print("WARNING: %s unreadable (%s); archived chats are not filtered out" % (idx_p, e))
     out = {}
     for f in glob.glob(os.path.join(pair, "local_*.json")):
         cid = os.path.basename(f)[:-5]
         try:
             with open(f, encoding="utf-8") as fh:
                 j = json.load(fh)
+            if not isinstance(j, dict):
+                raise ValueError("not a JSON object")
+            for key in ("title", "cwd"):
+                if j.get(key) is not None and not isinstance(j[key], str):
+                    raise ValueError("%r is %s, not a string" % (key, type(j[key]).__name__))
         except (OSError, ValueError) as e:   # one unreadable session file must not hide every other chat
             print("WARNING: skipped unreadable session file %s: %s" % (f, e))
             continue
@@ -103,7 +128,10 @@ def sessions():
 chats, pair = sessions()
 rows = [(os.path.join(a.root, "coordinator", "inbox"), ["Coordinator"])]
 for lane in sorted(glob.glob(os.path.join(a.root, "lanes", "*"))):
-    head = open(os.path.join(lane, "LANE.md"), encoding="utf-8").readline() if os.path.exists(os.path.join(lane, "LANE.md")) else ""
+    head = ""
+    if os.path.exists(os.path.join(lane, "LANE.md")):
+        with open(os.path.join(lane, "LANE.md"), encoding="utf-8-sig", errors="replace") as fh:
+            head = fh.readline()
     m = re.match(r"#\s*LANE:\s*(.+?)\s*\(", head)
     title = m.group(1) if m else os.path.basename(lane)
     for inbox in sorted(glob.glob(os.path.join(lane, "inbox", "*"))):
@@ -115,7 +143,10 @@ for inbox, names in rows:
     if not os.path.isdir(inbox):
         continue
     seen_p = os.path.join(inbox, ".seen")
-    seen = set(open(seen_p, encoding="utf-8-sig").read().splitlines()) if os.path.exists(seen_p) else set()
+    seen = set()
+    if os.path.exists(seen_p):
+        with open(seen_p, encoding="utf-8-sig", errors="replace") as fh:
+            seen = set(fh.read().splitlines())
     unread = [f for f in os.listdir(inbox) if ITEM.match(f) and f not in seen]
     age = (now - min(os.path.getmtime(os.path.join(inbox, f)) for f in unread)) / 60 if unread else 0
     title = next((n for n in names if n in chats), None)

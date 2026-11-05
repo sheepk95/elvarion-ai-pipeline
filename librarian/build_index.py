@@ -21,15 +21,18 @@ Version 2:
   there). A-library copies (_manifests/<name>.json) and anything under skill-library/_snapshot-* are copies, never rows.
   The old "library copy if its manifest says match" branch is gone: that flag was frozen at copy time.
 - The disk is re-read on every build, so a new install (in either root) gets its row on the next build. The
-  installer runs `--after-install <name>`, which rebuilds and refuses (exit 4) unless that name has exactly one vetted
-  row whose path is its live SKILL.md.
+  installer runs `--after-install <name>`, which rebuilds and refuses (exit 4) unless that name has exactly one row
+  whose path is its live SKILL.md. The row's status is reported in the JSON ("status"): a fresh install with no
+  matching owner TRUST.json entry is `installed-unverified` (installed, review pending), which still passes.
+  --simulate-install applies the same check to the row an install would get (the candidate folder is hashed against
+  TRUST.json; the row shows the projected destination path).
 - App-managed skills (plugins, synced claude.ai skills, Codex .system, shared brain skills) come from the gate list
   (<SKILL_RECORDS>/gate-folders.json) as status `app` rows: always available natively,
   never hidden, never installed or edited by us. ~/.codex files are never opened (existence check only).
 - main() is guarded, so importing this file no longer rebuilds the INDEX (trap: an import used to rebuild it).
 Usage: python -I -B build_index.py [--check] [--gate GATE.json] [--allow-empty]
-       (--allow-empty: write an empty INDEX even when SKILLS_DIR holds SKILL.md files but the build found 0 vetted rows;
-        without it that case exits 1 with an ERROR and writes nothing. -h / --help prints this text and exits 0.)
+       (--allow-empty: write an empty INDEX even when SKILLS_DIR holds SKILL.md files but the build found 0 skill rows
+        (vetted or installed-unverified); without it that case exits 1 with an ERROR and writes nothing. -h / --help prints this text and exits 0.)
        python -I -B build_index.py --after-install <name>          (rebuild, then verify that name's row; JSON out)
        python -I -B build_index.py --simulate-install <name>=<dir>  (dry run: build in memory as if <dir> were installed
                                                                      at skill-library/<name>; writes nothing)
@@ -305,13 +308,15 @@ def build(simulate=None, gate_path=GATE):
     rows = []
     for n in sorted(vetted):
         sk, fm, where = vetted[n]
+        # A simulated install has no destination folder yet: hash the candidate the installer would copy there.
+        package_file = os.path.join(simulate[1], "SKILL.md") if simulate and n == simulate[0] and where == "library (simulated)" else sk
         inst = installs.get(n)
         rv = reviews.get((inst.get("source_id"), inst.get("commit")), {}) if inst else {}
         entry = trust.get(n)
         approved = False
         if isinstance(entry, dict) and entry.get("kind") in ("reviewed", "in-house") and isinstance(entry.get("provenance"), str) and entry["provenance"].strip():
             try:
-                approved = isinstance(entry.get("files"), dict) and entry["files"] == package_manifest(sk)
+                approved = isinstance(entry.get("files"), dict) and entry["files"] == package_manifest(package_file)
             except (OSError, ValueError):
                 pass
         status = "vetted" if approved else "installed-unverified"
@@ -419,12 +424,16 @@ def parse_index(text):
     return out
 
 
-def verify_name(text, name, expect_path):
+def verify_name(text, name, expect_path, must_exist=True):
+    """ok when name has exactly one row (any status) whose path is expect_path (and, if must_exist, that file exists).
+
+    "status" says which: vetted, or installed-unverified (installed, owner review pending)."""
     rr = parse_index(text).get(name, [])
-    vet = [p for s, p in rr if s == "vetted"]
-    ok = len(rr) == 1 and len(vet) == 1 and norm(vet[0]) == norm(expect_path) and os.path.isfile(vet[0])
-    return {"name": name, "rows": len(rr), "vetted_rows": len(vet), "path": vet[0] if vet else None,
-            "expected": expect_path.replace("\\", "/"), "path_exists": bool(vet) and os.path.isfile(vet[0]), "ok": ok}
+    status, path = rr[0] if len(rr) == 1 else (None, None)
+    exists = bool(path) and os.path.isfile(path)
+    ok = len(rr) == 1 and norm(path or "") == norm(expect_path) and (exists or not must_exist)
+    return {"name": name, "rows": len(rr), "status": status, "vetted_rows": sum(s == "vetted" for s, _ in rr),
+            "path": path, "expected": expect_path.replace("\\", "/"), "path_exists": exists, "ok": ok}
 
 
 def write(b):
@@ -481,12 +490,9 @@ def main():
         if not name or not os.path.isfile(os.path.join(d, "SKILL.md")):
             sys.exit("usage: --simulate-install <name>=<dir with SKILL.md>")
         b = build((name, d), gate_path)
-        rr = parse_index(b["idx"]).get(name, [])
         expected = os.path.join(T.LIB, name, "SKILL.md")
-        res = {"rows": len(rr), "status": rr[0][0] if len(rr) == 1 else None,
-               "path": rr[0][1] if len(rr) == 1 else None, "expected": expected.replace("\\", "/"),
-               "path_exists": "n/a (dry run: nothing installed)"}
-        res["ok"] = len(rr) == 1 and norm(res["path"] or "") == norm(expected)
+        res = verify_name(b["idx"], name, expected, must_exist=False)  # the same check --after-install makes
+        res["path_exists"] = "n/a (dry run: nothing installed)"
         line = [l for l in b["idx"].splitlines() if l.startswith("| %s |" % name)]
         print(json.dumps({"dry_run": True, "wrote": False, "row": line, "check": res,
                           "counts": {"vetted": sum('| vetted |' in x for x in b['rows']),
@@ -498,7 +504,7 @@ def main():
     for w in b["warn"]:
         print("WARN", w, file=sys.stderr)
     if not b["rows"] and "--allow-empty" not in sys.argv and has_skill_files(T.SRC):
-        print("ERROR: %s holds SKILL.md files but the build found 0 vetted rows; nothing was written. Check SKILLS_DIR and "
+        print("ERROR: %s holds SKILL.md files but the build found 0 skill rows; nothing was written. Check SKILLS_DIR and "
               "SKILL_LIBRARY, or pass --allow-empty if an empty INDEX is what you want." % T.SRC, file=sys.stderr)
         return 1
     if "--check" in sys.argv:

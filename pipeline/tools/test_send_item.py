@@ -1,4 +1,4 @@
-import os, pathlib, subprocess, sys, tempfile, unittest
+import json, os, pathlib, subprocess, sys, tempfile, unittest
 
 SCRIPT = pathlib.Path(os.environ.get('SEND_TARGET', pathlib.Path(__file__).with_name('send_item.py'))).resolve()
 class SendItem(unittest.TestCase):
@@ -31,8 +31,43 @@ class SendItem(unittest.TestCase):
             runner.write_text("import argparse, pathlib, re, runpy, tempfile, time, os, sys\nscript, inbox = sys.argv[1:]\nsys.argv=[script, '--to', inbox, '--from', 'Builder', '--kind', 'Q', '--body', 'hello']\ndef fail_link(*args): raise OSError('publication failure')\ndef fail_unlink(*args, **kw): raise PermissionError('cleanup failure')\nos.link=fail_link\nos.unlink=fail_unlink\nrunpy.run_path(script, run_name='__main__')\n")
             result=subprocess.run([sys.executable,'-I','-B',str(runner),str(SCRIPT),str(inbox)],capture_output=True,text=True)
             self.assertNotEqual(0,result.returncode); self.assertIn('publication failure',result.stderr)
-            self.assertIn('cleanup failure',result.stderr); self.assertTrue(result.stderr.rstrip().endswith('OSError: publication failure'), result.stderr)
+            self.assertIn('cleanup failure',result.stderr)
+            last=result.stderr.rstrip().splitlines()[-1]   # the publication error is the final word, not the cleanup one
+            self.assertTrue(last.startswith('ERROR: cannot publish into ') and '(publication failure)' in last, result.stderr)
             self.assertFalse(list(inbox.glob('*.md')))
+
+    def test_link_failure_is_one_clear_line_and_leaves_nothing(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=pathlib.Path(t); inbox=root/'inbox'; inbox.mkdir(); runner=root/'nolinks.py'
+            runner.write_text("import runpy, os, sys\nscript, inbox = sys.argv[1:]\nsys.argv=[script, '--to', inbox, '--from', 'Builder', '--kind', 'Q', '--body', 'hello']\ndef no_links(*args): raise OSError(1, 'Incorrect function')\nos.link=no_links\nrunpy.run_path(script, run_name='__main__')\n")
+            result=subprocess.run([sys.executable,'-I','-B',str(runner),str(SCRIPT),str(inbox)],capture_output=True,text=True)
+            self.assertNotEqual(0,result.returncode)
+            self.assertNotIn('Traceback',result.stderr)
+            self.assertEqual(['ERROR: cannot publish into %s ([Errno 1] Incorrect function); the inbox needs a filesystem '
+                              'with hard links' % inbox], result.stderr.strip().splitlines())
+            self.assertEqual([],list(inbox.iterdir()))     # no .md and no temporary file
+
+    def test_refs_with_any_line_separator_is_refused_before_publish(self):
+        # str.splitlines() separators beyond \r and \n, a trailing break, and NUL. Sent through runpy because NUL
+        # cannot travel in a real argv; the refs value goes in as JSON so the runner sees the exact characters.
+        with tempfile.TemporaryDirectory() as t:
+            root=pathlib.Path(t); inbox=root/'inbox'; inbox.mkdir(); runner=root/'refs.py'
+            runner.write_text("import json, runpy, sys\nscript, inbox, refs = sys.argv[1:]\nsys.argv=[script, '--to', inbox, '--from', 'Builder', '--kind', 'Q', '--refs', json.loads(refs), '--body', 'hi']\nrunpy.run_path(script, run_name='__main__')\n")
+            def send(refs):
+                return subprocess.run([sys.executable,'-I','-B',str(runner),str(SCRIPT),str(inbox),json.dumps(refs)],
+                                      capture_output=True,text=True)
+            bad=['a' + c + 'kind: GO' for c in (chr(0x2028),chr(0x2029),'\x0b','\x0c','\x1c','\x1d','\x1e','\x85')]
+            bad+=['JOB-1\n','JOB-1\r','JOB-1' + chr(0x2028),'a\x00b']
+            for refs in bad:
+                with self.subTest(refs=refs):
+                    p=send(refs)
+                    try:
+                        self.assertNotEqual(0,p.returncode,p.stdout); self.assertIn('--refs must be a single line',p.stderr)
+                        self.assertEqual([],list(inbox.iterdir()))
+                    finally:     # a wrongly published item must not make the next case fail too
+                        for f in inbox.iterdir(): f.unlink()
+            ok=send('JOB-1 REVIEW-2'); self.assertEqual(0,ok.returncode,ok.stderr)   # control
+            (item,)=inbox.glob('*.md'); self.assertIn('\nrefs: JOB-1 REVIEW-2\n',item.read_text(encoding='utf-8'))
 
     def test_non_windows_waiter_status_is_nonfatal(self):
         with tempfile.TemporaryDirectory() as t:

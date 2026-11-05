@@ -73,7 +73,9 @@ FREE_MARGIN_GB = 0.5  # nvidia-smi must show the lease's GB plus this much free
 MAX_MINUTES = 480  # every lease, with or without --pid, expires unless renewed within this
 HEARTBEAT_S = 60  # `run` renews every minute ...
 HEARTBEAT_LEASE_MIN = 5  # ... to five minutes ahead, so a killed wrapper's lease lapses within 5 min
-LOCK_WAIT_S = 60.0
+# A claim holds the ledger lock for one telemetry sample: PowerShell (timeout 30 s) plus nvidia-smi (timeout 15 s).
+# Two claimants back to back can hold it for 90 s, so a waiting client must be able to outlast that.
+LOCK_WAIT_S = 120.0
 QUEUE_STALE_S = 120  # a queue ticket not refreshed for this long is dropped (its waiter died)
 LABEL = 'gpu_lease'  # line 2 of a UNITY_PRIORITY written here starts with this
 
@@ -89,6 +91,7 @@ SEEN_RULES = json.loads(os.environ.get('GPU_LEASE_SEEN_JSON') or 'null') or [
 ]
 TEST_HOLD_S = float(os.environ.get('GPU_LEASE_TEST_HOLD_S') or 0)
 RETRY_S = 3.0  # Windows refuses rename/replace/delete while another process has the file open: retry this long
+PROCESS_SCAN = os.name == 'nt'  # process enumeration (PowerShell/CIM) exists only on Windows
 
 
 def retry(fn, *args):
@@ -336,7 +339,7 @@ Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, N
 
 def processes():
     """{pid: (ppid, name lower, command line lower with / slashes)} or None when the list cannot be read."""
-    if os.name != 'nt':
+    if not PROCESS_SCAN:
         return None
     try:
         p = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', PROCS_PS],
@@ -557,14 +560,75 @@ class TelemetryError(RuntimeError):
 
 
 def claim(a, pid):
-    """(lease, None) or (None, reason). With --wait, queues and waits up to a.wait seconds."""
+    """(lease, None) or (None, reason). With --wait, queues and waits up to a.wait seconds.
+
+    Missing telemetry refuses admission (TelemetryError). With --wait it counts as a busy reason until the deadline:
+    the queue ticket is kept and the claim polls again; only a sample still missing at the deadline raises. Off
+    Windows process enumeration can never succeed, so the claim raises at once."""
     lid = new_id()
     end = now() + float(a.wait or 0)
     waiting = float(a.wait or 0) > 0
     last = None
     ticket = None
+
+    def hold_place(why):
+        """Write (or refresh) this claim's queue ticket. Caller holds the Lock."""
+        nonlocal ticket
+        if ticket is None:
+            ticket = {'id': lid, 'ts': now(), 'beat': now(), 'pid': os.getpid(),
+                      'pid_started': pid_started(os.getpid()), 'who': a.who,
+                      'what': a.what, 'gb': float(a.gb), 'exclusive': bool(a.exclusive),
+                      'yields': bool(a.yields)}
+            log_event('queued', ticket, reason=why)
+        ticket['beat'] = now()
+        write_json('queue', lid, ticket)
+
+    def admit(procs, free):
+        """One admission decision from this poll's sample. Caller holds the Lock. Returns (lease or None, why)."""
+        live, queue = reap()
+        seen = sync_seen(scan_seen(procs, live))
+        holders = live + seen
+        why = blockers(holders, float(a.gb), a.exclusive, free)
+        if TEST_HOLD_S:
+            time.sleep(TEST_HOLD_S)  # selftest only: widen the read-decide-write window so a missing lock shows
+        priority = (bool(a.yields), ticket['ts'] if ticket else now())
+        ahead = [t for t in queue if t['id'] != lid and
+                 (bool(t.get('yields')), t['ts']) < priority]
+        if why is None and ahead:
+            why = 'queued behind %s (%s: %s)' % (ahead[0]['id'], ahead[0]['who'], ahead[0]['what'])
+        if why is None:
+            lease = new_lease(a, pid, lid)
+            # Only foreground exclusive work raises the old "give me the GPU" flag; background (--yields) work
+            # must leave it free so a waiter can use it to ask that work to step aside.
+            # A waiter that asked background work to yield keeps its flag until its own lease closes, or
+            # the background job would come straight back mid-job.
+            raised = flag_owner(flag_lines()) == lid
+            if (a.exclusive and not a.yields) or raised:
+                if not write_flag(lid, a.who, lease['expires'], pid):
+                    why = 'cons-port/UNITY_PRIORITY appeared at the same moment'
+        if why is None:
+            write_json('active', lid, lease)
+            log_event('open', lease)
+            if ticket:
+                drop('queue', lid)
+            return lease, None
+        if waiting:
+            hold_place(why)
+            # Head of the line and blocked only by background (--yields) work: ask it to step aside.
+            if not a.yields and not ahead and not legacy_holds():
+                rest = [x for x in holders if not x.get('yields')]
+                if len(rest) < len(holders) and blockers(rest, float(a.gb), a.exclusive) is None:
+                    if write_flag(lid, a.who, int(end), 0) and why != last:
+                        log_event('yield-asked', ticket, yielding=[x.get('id') or x['key'] for x in holders
+                                                                   if x.get('yields')])
+        elif why != last:
+            log_event('refused', {'who': a.who, 'what': a.what, 'gb': float(a.gb),
+                                  'exclusive': bool(a.exclusive)}, reason=why)
+        return None, why
+
     try:
         while True:
+            blind = None  # the TelemetryError text when this poll could not read telemetry
             with Lock():
                 # A claimant may have waited for this lock. Sample after acquiring it so an unbooked
                 # process that started during that wait is not hidden by an old snapshot.
@@ -576,59 +640,27 @@ def claim(a, pid):
                 if free is None or not math.isfinite(free) or free < 0:
                     missing.append('GPU free memory (nvidia-smi)')
                 if missing:
-                    raise TelemetryError('GPU admission refused: unavailable %s; restore telemetry and retry; '
-                                         'use status for diagnostics' % ' and '.join(missing))
-                live, queue = reap()
-                seen = sync_seen(scan_seen(procs, live))
-                holders = live + seen
-                why = blockers(holders, float(a.gb), a.exclusive, free)
-                if TEST_HOLD_S:
-                    time.sleep(TEST_HOLD_S)  # selftest only: widen the read-decide-write window so a missing lock shows
-                priority = (bool(a.yields), ticket['ts'] if ticket else now())
-                ahead = [t for t in queue if t['id'] != lid and
-                         (bool(t.get('yields')), t['ts']) < priority]
-                if why is None and ahead:
-                    why = 'queued behind %s (%s: %s)' % (ahead[0]['id'], ahead[0]['who'], ahead[0]['what'])
-                if why is None:
-                    lease = new_lease(a, pid, lid)
-                    # Only foreground exclusive work raises the old "give me the GPU" flag; background (--yields) work
-                    # must leave it free so a waiter can use it to ask that work to step aside.
-                    # A waiter that asked background work to yield keeps its flag until its own lease closes, or
-                    # the background job would come straight back mid-job.
-                    raised = flag_owner(flag_lines()) == lid
-                    if (a.exclusive and not a.yields) or raised:
-                        if not write_flag(lid, a.who, lease['expires'], pid):
-                            why = 'cons-port/UNITY_PRIORITY appeared at the same moment'
-                if why is None:
-                    write_json('active', lid, lease)
-                    log_event('open', lease)
-                    if ticket:
-                        drop('queue', lid)
-                    return lease, None
-                if waiting:
-                    if ticket is None:
-                        ticket = {'id': lid, 'ts': now(), 'beat': now(), 'pid': os.getpid(),
-                                  'pid_started': pid_started(os.getpid()), 'who': a.who,
-                                  'what': a.what, 'gb': float(a.gb), 'exclusive': bool(a.exclusive),
-                                  'yields': bool(a.yields)}
-                        log_event('queued', ticket, reason=why)
-                    ticket['beat'] = now()
-                    write_json('queue', lid, ticket)
-                    # Head of the line and blocked only by background (--yields) work: ask it to step aside.
-                    if not a.yields and not ahead and not legacy_holds():
-                        rest = [x for x in holders if not x.get('yields')]
-                        if len(rest) < len(holders) and blockers(rest, float(a.gb), a.exclusive) is None:
-                            if write_flag(lid, a.who, int(end), 0) and why != last:
-                                log_event('yield-asked', ticket, yielding=[x.get('id') or x['key'] for x in holders
-                                                                           if x.get('yields')])
-                elif why != last:
-                    log_event('refused', {'who': a.who, 'what': a.what, 'gb': float(a.gb),
-                                          'exclusive': bool(a.exclusive)}, reason=why)
+                    if procs is None and not PROCESS_SCAN:
+                        raise TelemetryError('GPU admission refused: unavailable %s; process enumeration is '
+                                             'Windows-only, so this tool cannot admit GPU work on this platform; '
+                                             'use status for diagnostics' % ' and '.join(missing))
+                    blind = ('GPU admission refused: unavailable %s; restore telemetry and retry; '
+                             'use status for diagnostics' % ' and '.join(missing))
+                    if not waiting:
+                        raise TelemetryError(blind)
+                    why = 'telemetry unavailable: ' + ' and '.join(missing)
+                    hold_place(why)  # a blip while waiting: keep the place in line and poll again
+                else:
+                    lease, why = admit(procs, free)
+                    if lease:
+                        return lease, None
             if why != last:
                 if waiting:
                     sys.stderr.write('%s waiting: %s\n' % (iso(), why))
                 last = why
             if now() >= end:
+                if blind is not None:
+                    raise TelemetryError(blind)  # still no telemetry at the deadline
                 return None, why
             time.sleep(min(10.0, max(0.5, end - now())))
     finally:
@@ -749,7 +781,7 @@ def run(a, cmd):
         try:
             release(lease['id'], 'run exited %s' % code)
             print('lease %s closed (exit %s)' % (lease['id'], code), flush=True)
-        except OSError as err:
+        except (OSError, RuntimeError) as err:  # RuntimeError: the ledger lock was not free within LOCK_WAIT_S
             print('lease %s NOT closed (%s); it lapses within %d min' % (lease['id'], err, HEARTBEAT_LEASE_MIN),
                   flush=True)
     return code

@@ -118,6 +118,34 @@ for tag, body in (('3a', {'loaded': True, 'epoch': 'not-a-number', 'utc': 'x'}),
     check('%s ask_librarian --status survives it too' % tag, r.returncode == 0 and 'Traceback' not in r.stderr,
           '%s %r' % (r.returncode, r.stderr[-400:]))
 
+# ---- 4. heartbeat times JSON can hold but a float cannot use: never a crash, never "fresh" ----
+# Raw JSON text, so the values are exactly what a damaged file would hold (Python's json reads all of them).
+for tag, epoch in (('4a', '1' + '0' * 400), ('4b', 'Infinity'), ('4c', '-Infinity'), ('4d', 'NaN'),
+                   ('4e', '1e999'), ('4f', '-1e999'), ('4g', '1e18')):
+    with open(hb, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('{"loaded": true, "epoch": %s, "session_active_epoch": %s, "utc": "x", "last_event": "heartbeat"}\n'
+                % (epoch, epoch))
+    label = '%s heartbeat epoch %s' % (tag, epoch if len(epoch) < 20 else '10**400')
+    code, out, err = inbox('status')
+    check(label + ': status exits 0 and says the asker would fall back (unreadable)',
+          code == 0 and 'Traceback' not in err and 'heartbeat:' in out and 'fall back (heartbeat unreadable)' in out,
+          '%s %r %r' % (code, out, err[-400:]))
+    r = subprocess.run([sys.executable, '-I', '-B', os.path.join(LIB, 'ask_librarian.py'), '--mailbox', MB, '--status'],
+                       capture_output=True, text=True, encoding='utf-8', timeout=60, env=ENV)
+    check(label + ': ask_librarian --status exits 0 with the same diagnostic',
+          r.returncode == 0 and 'Traceback' not in r.stderr and 'fall back (heartbeat unreadable)' in r.stdout,
+          '%s %r %r' % (r.returncode, r.stdout[-400:], r.stderr[-400:]))
+    before = sorted(os.listdir(requests_dir()))
+    t0 = time.time()
+    r = subprocess.run([sys.executable, '-I', '-B', os.path.join(LIB, 'ask_librarian.py'), '--mailbox', MB,
+                        '--from', 'inbox-test', '--timeout', '8', '--no-finder', 'a damaged heartbeat must fall back'],
+                       capture_output=True, text=True, encoding='utf-8', timeout=60, env=ENV)
+    after = sorted(os.listdir(requests_dir()))
+    check(label + ': an ask falls back at once (exit 3) and files no request',
+          r.returncode == 3 and 'Traceback' not in r.stderr and before == after and time.time() - t0 < 6,
+          '%s %.1fs filed=%s %r %r' % (r.returncode, time.time() - t0, sorted(set(after) - set(before)),
+                                       r.stdout[-300:], r.stderr[-300:]))
+
 shutil.rmtree(TMP, ignore_errors=True)
 print('RESULT', 'FAIL' if fails else 'PASS', len(fails), 'failures')
 sys.exit(1 if fails else 0)
