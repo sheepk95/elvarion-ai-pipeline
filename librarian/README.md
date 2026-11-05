@@ -35,6 +35,17 @@ the catalogue format on the next `catalogue-check`, so previously shortened desc
 | `build_full_catalogue.py` | Turns `INDEX.md` into part files small enough for one Read call each, with a LARGE flag on SKILL.md files over 50,000 bytes and a manifest of hashes. |
 | `build_index.py` | Builds `INDEX.md` and `REJECTED.md` from the SKILL.md frontmatter of a skills folder and a library folder, plus optional record files. **It rewrites the INDEX of the library it points at**, see below. |
 
+Answers received during an ask are staged for recovery before they are printed; late answers delivered by `--late`
+or a subsequent ask follow the same acknowledgement rule. A broken output pipe leaves the answer available to retry
+with `--late ID`; if the original output never gave the ID, find its record under the mailbox `late/` directory.
+Per-request OS locks serialize competing deliveries, without a blocked reader holding up unrelated requests. A failed
+acknowledgement reports an error rather than success and leaves the answer available. The Python `ask`, `unread_late`
+and `wait_late` APIs return previews without acknowledging delivery; the CLI stages on-time answers. A process stopped
+after a successful flush but before the marker is written can deliver the same answer again on retry: a pipe and a file
+cannot be committed atomically. The optional, separately supplied finder hook has its own delivery contract and is not
+covered by this guarantee. Upgrade every `ask_librarian.py` reader sharing a mailbox together: older readers do not
+use these delivery locks and acknowledge before flushing, so mixed versions cannot guarantee once-only delivery.
+
 ## Environment variables
 
 | Variable | Used by | Default |

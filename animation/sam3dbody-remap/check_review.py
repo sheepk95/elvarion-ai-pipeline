@@ -14,8 +14,8 @@ script; --checklist wins). CLAUDE_PROJECTS_DIR = where Claude Code keeps session
 by eye: if you change the checklist's numbering, change LOOK to match.
 
 What it checks (each problem prints one CHECK_REVIEW line):
-  1. Every numbered item of the master checklist is in the copy, and none is left blank `[ ]` (section 11 may stay
-     blank until the person passes the clip: `--final yes` then requires it). Section 10's questions: every box filled.
+  1. The master's numbered item text and section, and section 10 question text and multiplicity, are retained;
+     duplicate IDs fail. No box is blank `[ ]` (section 11 may stay blank until `--final yes`).
   2. A box is `[x]`, `[!]` or `[-]`. `[-]` needs a separate indented `reason:` line (3+ words). `[!]` needs video frames (f12, f30-48).
   3. LOOK items (judged by eye: LOOK below) that are `[x]` or `[!]` carry at least one proof line:
          see: <picture path> f<frames>: <what the picture shows at those frames>
@@ -31,6 +31,7 @@ What it checks (each problem prints one CHECK_REVIEW line):
 Ends `CHECK_REVIEW VERDICT PASS|FAIL`; exit 1 on FAIL, 2 on a usage error. Reads only; writes nothing.
 """
 import glob, json, os, re, sys
+from collections import Counter
 
 LOOK = set("""2.2 3.0 3.1 3.2 3.3 3.4 3.5 3.6 3.7 4.1 4.2 4.3 4.4 4.5 4.6 5.1 5.1b 5.2 5.3 6.1 6.2 6.3 6.4 6.5
 7.1 7.2 7.3 7.4 7.5 8.1 8.2 8.3 8.4 8.5 8.6 9.6 9.9""".split())
@@ -38,7 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MASTER = os.environ.get("REVIEW_CHECKLIST", os.path.join(HERE, "REVIEW-CHECKLIST.example.md"))
 PROJECTS = os.environ.get("CLAUDE_PROJECTS_DIR", os.path.join(os.path.expanduser("~"), ".claude", "projects"))
 PIC = (".png", ".jpg", ".jpeg", ".webp", ".gif")
-BOX = re.compile(r"^\s*-\s*\[(.)\]\s*(?:\*\*)?\s*(\d+\.\d+[a-z]?)?")
+BOX = re.compile(r"^ {0,3}-\s*\[(.)\]\s*(?:\*\*)?\s*(\d+\.\d+[a-z]?)?")
 SEE = re.compile(r"see:\s*(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|([^\s`\"']+))\s+(f\d+(?:\s*-\s*\d+)?(?:\s*,\s*f?\d+(?:\s*-\s*\d+)?)*)\s*:\s*(.+)", re.I)
 REASON = re.compile(r"^[ \t]*reason:[ \t]*([^\r\n]+)$", re.I | re.M)
 FRAMES = re.compile(r"\bf\d+", re.I)
@@ -77,10 +78,66 @@ def norm(p):
     return os.path.normcase(os.path.abspath(p.replace("\\", "/"))).replace("\\", "/")
 
 
+def active_lines(text):
+    """Yield uncommented, unfenced lines; None separates excluded content from surrounding evidence."""
+    in_comment, fence = False, None
+    for raw in text.splitlines():
+        if fence:
+            if re.match(r'^ {0,3}' + re.escape(fence[0]) + '{' + str(fence[1]) + r',}\s*$', raw):
+                fence = None
+            yield None
+            continue
+        if not in_comment:
+            opening = re.match(r'^ {0,3}(`{3,}|~{3,})', raw)
+            if opening:
+                fence = (opening.group(1)[0], len(opening.group(1)))
+                yield None
+                continue
+        line, rest = '', raw
+        while rest:
+            if in_comment:
+                end = rest.find('-->')
+                if end < 0:
+                    rest = ''
+                else:
+                    rest = rest[end + 3:]
+                    in_comment = False
+            else:
+                start = rest.find('<!--')
+                if start < 0:
+                    line += rest
+                    rest = ''
+                else:
+                    line += rest[:start]
+                    rest = rest[start + 4:]
+                    in_comment = True
+        if line != raw:
+            yield None
+        yield line
+
+
+def has_html(text):
+    """Refuse HTML-like tags outside fenced blocks, comments and single-line inline code spans."""
+    # Comment delimiters inside code spans are ambiguous to this subset parser. Refuse them
+    # rather than letting one hide subsequent active HTML from the scanner.
+    if any('`' in line and ('<!--' in line or '-->' in line) for line in text.splitlines()):
+        return True
+    for line in active_lines(text):
+        if line is None:
+            continue
+        line = re.sub(r'(`+)(?!`)(.*?)(?<!`)\1(?!`)', '', line)
+        if re.search(r'<\s*/?\s*[A-Za-z][A-Za-z0-9-]*(?=[\s/>]|$)', line):
+            return True
+    return False
+
+
 def items(text):
-    """[(id or None, mark, block text, section number)] for each box; a block = the box line + its indented lines."""
+    """Parse the documented checklist subset, excluding HTML comments and fenced or indented code boxes."""
     out, cur, sec = [], None, None
-    for line in text.splitlines():
+    for line in active_lines(text):
+        if line is None:
+            cur = None
+            continue
         h = re.match(r"^##\s+(\d+)\.", line)
         if h:
             sec = int(h.group(1))
@@ -97,6 +154,11 @@ def items(text):
         elif cur is not None:
             cur = None
     return out
+
+
+def prompt(it):
+    """First box line without its mark; allow surrounding whitespace, not rewritten prompts."""
+    return re.sub(r"^\s*-\s*\[.\]\s*", "", it[2].splitlines()[0]).strip()
 
 
 def find_transcripts(copy):
@@ -194,9 +256,15 @@ def main():
         usage(f"no such checklist: {opt['--checklist']}")
     master_text = open(opt["--checklist"], encoding="utf-8", errors="replace").read()
     text = open(copy, encoding="utf-8", errors="replace").read()
+    if has_html(master_text):
+        usage("master checklist contains unsupported raw HTML")
     master = items(master_text)
     want_ids = [i for i, _, _, _ in master if i]
-    q_master = sum(1 for i, _, _, s in master if i is None and s == 10)
+    if len(set(want_ids)) != len(want_ids):
+        usage("master checklist has duplicate item IDs")
+    master_by_id = {it[0]: it for it in master if it[0]}
+    master_questions = [prompt(it) for it in master if it[0] is None and it[3] == 10]
+    q_master = len(master_questions)
     got = items(text)
     by_id = {}
     for it in got:
@@ -204,6 +272,11 @@ def main():
             by_id.setdefault(it[0], it)
     problems = []
     P = lambda code, msg: problems.append(f"CHECK_REVIEW {code} {msg}")
+    if has_html(text):
+        P("HTML", "raw HTML is unsupported in the checklist copy")
+    for item_id, count in Counter(it[0] for it in got if it[0]).items():
+        if count > 1:
+            P("DUPLICATE", f"{item_id}: appears {count} times in the copy")
     min_words = int(opt["--min-words"])
     if opt["--blend"] and not os.path.isfile(opt["--blend"]):
         usage(f"no such blend: {opt['--blend']}")
@@ -213,9 +286,15 @@ def main():
     for i in want_ids:
         if i not in by_id:
             P("MISSING", f"{i}: not in the copy (fill every item of the checklist; `[-]` with a reason if it does not apply)")
+        else:
+            expected, actual = master_by_id[i], by_id[i]
+            if actual[3] != expected[3]:
+                P("SECTION", f"{i}: belongs in section {expected[3]}, not {actual[3]}")
+            if prompt(actual) != prompt(expected):
+                P("PROMPT", f"{i}: retain the master item text on the box line")
     q_got = [it for it in got if it[0] is None and it[3] == 10]
-    if len(q_got) < q_master:
-        P("MISSING", f"section 10: {len(q_got)} of {q_master} questions in the copy")
+    if Counter(prompt(it) for it in q_got) != Counter(master_questions):
+        P("QUESTION", "section 10 questions must match the master, including duplicates and wording")
     pics, descs = [], {}
     checked = list(by_id.items()) + [(f"section 10 question {n}", it) for n, it in enumerate(q_got, 1)]
     for i, it in checked:

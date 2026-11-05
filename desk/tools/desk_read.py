@@ -3,7 +3,7 @@
 Usage: python -B -I desk_read.py [--peek] [--root DIR]
   --peek   print without moving the read offsets
 Run it on every wake, log each new [DESK Q] in QUEUE.md and each [DESK UPDATE] in your own state file's lane table,
-then re-arm desk_watch.py. Exit 0 always; the last line counts new questions and updates.
+then re-arm desk_watch.py. Exit 0 on success, nonzero on errors; the last line counts new questions and updates.
 """
 import argparse
 import os

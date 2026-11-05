@@ -134,6 +134,21 @@ refusal, individual N/A with sufficient image evidence, and invalid minimum/abse
 picture count applies even when every look item is marked N/A and cannot be set to zero. Each N/A item needs a
 separate indented `reason:` line with at least three words. Quote picture paths containing spaces.
 
+Copy the master box lines verbatim, including their IDs, Markdown formatting and question wording, in their
+original numbered sections. Change the checkbox marks and add indented evidence or reasons below each box;
+surrounding whitespace on box lines is allowed. Duplicate item IDs are rejected. Section 10 must contain the same
+questions as the master, with the same multiplicity. If the checklist itself needs changing, edit the master and
+use that master consistently for the copy and gate.
+
+The checker reads a limited Markdown subset, not a full Markdown renderer: numbered section headings must start
+with `## `; each complete prompt must be on its checkbox line, with at most three leading spaces. Boxes and headings
+inside HTML comments or backtick/tilde fenced code blocks do not count; boxes indented by four spaces or a tab do
+not count. Put evidence and reasons on separate indented lines beneath a live box, outside comments and fences.
+Use the same simple layout for a custom master and its copy; multiline prompts and nested lists are unsupported.
+Raw HTML-like tags in active text are refused, including tags with attributes split across lines. Single-line
+inline code spans may contain angle-bracket placeholders. Lines combining backticks and HTML comment delimiters
+are refused even in fenced text, because their interpretation is ambiguous to this parser.
+
 Pass a Codex session JSONL with `--transcript`. Supported calls are a direct `view_image`/`functions.view_image`
 with JSON arguments containing only `path`, or this complete `exec`/`functions.exec` program (a double-quoted
 JSON string path, `const` or `let`, and the same variable in both statements):

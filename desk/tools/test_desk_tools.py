@@ -111,6 +111,20 @@ check('answered copy does not wake', code == 2, '%s %s' % (code, out))
 code, out = run('desk_read.py')
 check('answered copy still read', '1 new [DESK Q]' in out and 'old one' in out, out)
 
+# Only a complete answered marker at the end suppresses a copied question.
+append('[DESK Q] G9 | old decision | local_aaaa (answered DQ-123)  \n')
+code, out = run('desk_watch.py', '--interval', '0.1', '--max-seconds', '0.2')
+check('documented answered suffix does not wake', code == 2, '%s %s' % (code, out))
+run('desk_read.py')
+for text in ('Should we use the old design (answered in an earlier issue)?',
+             'Earlier decision (answered DQ-123) needs reconsidering',
+             'Please reconsider this (answered in an earlier issue)',
+             'What now? (answered: )', 'What now? (answered:\t)'):
+    append('[DESK Q] G9 | blocking: yes | ' + text + '\n')
+    code, out = run('desk_watch.py', '--interval', '0.1', '--max-seconds', '0.2')
+    check('ordinary answered text still wakes: ' + text, code == 0 and text in out, '%s %s' % (code, out))
+    run('desk_read.py')
+
 # 10 an update that only mentions [DESK Q] is not a question; a BOM before [DESK Q] still is
 append('[DESK UPDATE] G9 closing | earlier [DESK Q] on X is resolved\n')
 code, out = run('desk_watch.py', '--interval', '0.5', '--max-seconds', '1')

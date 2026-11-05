@@ -56,6 +56,7 @@ LEAD_TS = re.compile(r'^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z|\d{8}T\d{6}Z)\s+
 # An item is <UTC>-<from>-<n>.md (pipeline/tools/wait_inbox.py ITEM). NOT_ITEMS and HANDLED serve waiters that
 # keep an ACKS.md; the shipped pipeline marks handled items in <inbox>/.seen instead (both are read).
 ITEM_RE = re.compile(r'^\d[^/\\]*\.md$')
+ANSWERED_COPY = re.compile(r'\(answered(?:[ \t]+DQ-\d+|:[ \t]*[^()\s][^()\r\n]*)\)[ \t]*$')
 NOT_ITEMS = {'acks.md', 'sent.md', 'readme.md'}
 HANDLED = ('done', 'parked')
 WARN = set()             # unreadable files, unlistable folders, a missing root: printed with exits 0, 2, 5 and 6
@@ -633,8 +634,9 @@ def main():
                 WARN.add('WARNING lane file %s unreadable (%s): its [DESK Q] lines were not checked this poll'
                          % (name, type(e).__name__))
                 continue
-            # A copied question that already has its answer ends with "(answered ...": desk_read still shows it.
-            hits += ['%s: %s' % (name, l[:300]) for l in lines if desk_files.kind(l) == 'Q' and '(answered' not in l]
+            # Only an explicit suffix marks an answered copy; prose mentioning an answer still wakes the desk.
+            hits += ['%s: %s' % (name, l[:300]) for l in lines
+                     if desk_files.kind(l) == 'Q' and not ANSWERED_COPY.search(l)]
             # A self-clear handover also wakes the desk chat: the lane's own resume cron and waker die with the clear
             # (seen in practice), so the desk chat must send the resume message.
             hits += ['%s: %s' % (name, l[:300]) for l in lines
