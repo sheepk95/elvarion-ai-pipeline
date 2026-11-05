@@ -106,6 +106,10 @@ measure (`torch.cuda.max_memory_allocated()`) and add 1 GB. Unsure: book high, t
 - A Git-for-Windows program in front of a GPU program (`timeout`, `env`, `bash other.sh`) can break the process tree,
   so the GPU program shows as SEEN while your lease is open. For a time limit inside a booked script use
   `scripts/lease_timeout.py <seconds> <command> [args...]`, a plain Python wrapper that keeps the chain.
+  It starts the command suspended in a Windows job and terminates all job descendants on timeout **and** when the
+  command exits normally. Restrictive parent jobs can prevent assignment; then the command is not run. On termination
+  or verification failure it retries while keeping the wrapper alive; the enclosing run heartbeat must still renew its lease.
+  A 124 exit means the job was verified empty.
 - Killing a `run` wrapper can leave its child running. The next ledger operation can reap the booking when the wrapper
   PID is dead; heartbeat expiry is another cleanup path. Either way the child then runs unbooked.
 

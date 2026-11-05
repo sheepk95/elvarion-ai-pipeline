@@ -125,6 +125,14 @@ class SafetyTests(unittest.TestCase):
                 m.adopt('L1', pid)
         self.assertEqual(101, m.find_active('L1')['adopted_started'][str(pid)])
 
+    def test_unbooked_gpu_ancestor_and_independent_process_are_seen(self):
+        me = os.getpid()
+        parent, other = 987651, 987652
+        procs = {me: (parent, 'python.exe', ''), parent: (0, 'blender.exe', ''),
+                 other: (0, 'blender.exe', '')}
+        self.assertEqual({parent, other}, {x['pid'] for x in self.m.scan_seen(procs, [])})
+        self.assertEqual({other}, {x['pid'] for x in self.m.scan_seen(procs, [dict(pid=parent)])})
+
     def test_run_passes_lease_id_and_reports_unstartable_command(self):
         a = self.args()
         seen = {}

@@ -68,7 +68,7 @@ All paths are parameters or environment variables; nothing is hard-coded.
 | Variable | Used by | Default |
 |---|---|---|
 | `SAM3DB_SRC` | `run_sam3db.py`, `facing_scan.py`, `views3d.py` | `./src` beside the script (your clone of Meta's repo) |
-| `SAM3DB_CKPT_DIR` | `run_sam3db.py`, `verify_checkpoint.py`, `get_checkpoint.sh`, `sam_to_source.py` | `./checkpoints/sam-3d-body-vith` beside the script |
+| `SAM3DB_CKPT_DIR` | `run_sam3db.py`, `verify_checkpoint.py`, `get_checkpoint.sh`, `sam_to_source.py` | `./checkpoints/sam-3d-body-vith` in the kit folder (parent of `examples-auto-rig-pro`) |
 | `SAM3DB_SRC_COMMIT` | `run_sam3db.py` | `unknown` (only written to `run.json`; the kit was tried on commit `b5c765a0d89d789985e186d396315e7590887b94`) |
 | `SAM3DB_VENV`, `PYTHON`, `TORCH_INDEX` | `install_venv.sh` | `./venv`, `python3.11`, the cu126 wheel index |
 | `SAM3DB_HF_REPO`, `SAM3DB_HF_REVISION`, `HF` | `get_checkpoint.sh` | `facebook/sam-3d-body-vith`, the repo's latest, the venv's `hf` |
@@ -131,8 +131,20 @@ any of them is imported.
 
 `python -I -B test_check_review.py` uses temporary fixtures. It includes zero-picture/all-N/A
 refusal, individual N/A with sufficient image evidence, and invalid minimum/absent-file diagnostics. The minimum
-picture count applies even when every look item is marked N/A and cannot be set to zero. Transcript evidence shows
-that image files were opened, not that the reviewer understood them; the human animation gate still matters.
+picture count applies even when every look item is marked N/A and cannot be set to zero. Each N/A item needs a
+separate indented `reason:` line with at least three words. Quote picture paths containing spaces.
+
+Pass a Codex session JSONL with `--transcript`. Supported calls are a direct `view_image`/`functions.view_image`
+with JSON arguments containing only `path`, or this complete `exec`/`functions.exec` program (a double-quoted
+JSON string path, `const` or `let`, and the same variable in both statements):
+
+```javascript
+const result = await tools.view_image({path: "C:/proof/frame one.png"}); image(result.image_url);
+```
+
+Other JavaScript forms receive no credit, including extra statements, conditionals and printed paths.
+Transcript evidence records a supported tool call; it does not establish that the call succeeded or that the
+reviewer observed or understood the picture. The human animation gate still matters.
 
 The repository check runner parses the Python sources without importing Blender or model packages. SAM, torch,
 Blender and actual animation quality require separate runs. The local Meta clone at `src/` is ignored by Git; keep

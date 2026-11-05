@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.1.4 (2026-11-05): review, routing and recovery fixes
+
+- The desk reader flushes its output before acknowledging messages, preserving unread work when output fails.
+- Visual review evidence accepts quoted image paths with spaces, rejects non-image paths and unrelated printed
+  paths, and requires a separate reason for N/A items. Codex evidence supports the literal call forms documented
+  in the animation README; it records a tool call, not proof that the call succeeded or the image was observed.
+- The account-switch census requires an explicit `--account-pairs` mapping for `CLAUDE_CODE_USER_EMAIL` and an
+  unambiguous title, inbox and workspace path before suggesting a wake. It never guesses the current account from
+  stored session folders. Damaged routing metadata refuses the census.
+- Waiter registration and cleanup share an OS lock. A second waiter cannot replace an existing live or potentially
+  live unverified registration. Recovery keys distinguish separate registrations, including episodes without process identity.
+  Re-arm existing waiters after upgrading; older clients do not participate in the registration lock protocol.
+- Failed librarian request moves become retryable after the recovery backoff. Per-request OS locks serialize
+  claims, and heartbeat writes refuse a busy lock instead of updating without it. Upgrade mailbox clients together.
+  The legacy abandonment helper retains its marker after a failed move and uses the same request lock.
+- GPU admission includes recognized GPU programs in the caller's ancestry. The Windows timeout wrapper contains
+  commands in a Job Object before starting them and waits for its processes to terminate before returning.
+  Descendants are also terminated when the parent exits normally; restrictive enclosing jobs may refuse startup.
+- The animation source converter finds its default checkpoint under the kit root; the environment override remains.
+- CPU regression coverage includes competing processes, broken output pipes, failed moves and Windows descendant
+  termination. Live desktop wake-ups, GPU admission under load, SAM/Blender inference, animation quality and POSIX
+  runtime behaviour remain separate acceptance checks.
+
 ## v0.1.3 (2026-11-05): dependency, process identity and animation output fixes
 
 - Job pins no longer mistake a dependency path beginning with `none` for an empty Reads section.

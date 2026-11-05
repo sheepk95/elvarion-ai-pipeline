@@ -56,7 +56,7 @@ Each wake: read new items, act, update BOARD.md, restart your waiter (the LAST t
   not done.
 - **CLEARING** (a chat about to clear): wait until it is idle, then wake it with one message: "Re-read RULES.md, your
   card and your HANDOVER note, then restart your waiter."
-- After an app restart or account switch: run `tools/switch_census.py` and wake the chats it lists, a few per turn.
+- After an app restart or account switch: run `tools/switch_census.py --account-pairs <map.json>` and wake the chats it lists, a few per turn.
 - Report to the desk only finished milestones and real blockers.
 
 BOARD.md is your memory. After any compaction or clear, re-read RULES.md, this card, BOARD.md and `jobs/` before

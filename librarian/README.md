@@ -16,6 +16,11 @@ asker  <--ask_librarian.py-- the answer (PICKS / MAYBE / ALSO GREP / NOTE)
 If the librarian is not live, `ask_librarian.py` says so at once (exit 3) and the asker greps `INDEX.md` instead, so a
 missing librarian never blocks work.
 
+Failed request moves retry after a 60-second backoff, including interrupted recovery attempts. Per-request OS locks
+serialize claim and move; their persistent `.lock` files must not be deleted while clients run. Upgrade every
+librarian process using a mailbox together so old clients cannot bypass those locks. A heartbeat lock that stays busy
+for 15 seconds now fails the command with `MAILBOX BUSY` and exit 1 without changing the heartbeat; retry the command.
+
 Catalogue descriptions support scalar and folded/literal block metadata without PyYAML. The standard-library
 fallback uses the same parser as the index builder and includes `when_to_use` text. Updating from v0.1.2 refreshes
 the catalogue format on the next `catalogue-check`, so previously shortened descriptions are rebuilt.

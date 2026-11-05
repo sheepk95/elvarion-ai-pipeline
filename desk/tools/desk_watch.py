@@ -224,6 +224,20 @@ def waiter_state(inbox, now, pipeline_root=''):
             try:
                 pid = int(pid_txt.strip())
                 key = 'pid-%d' % pid if 0 < pid <= 0xffffffff else 'pid-bad'
+                # Keep legacy/invalid identity episodes distinct from verified registrations.
+                ident = read_json(os.path.join(inbox, '.waiter.identity'))
+                if ident.get('pid') == pid and type(ident.get('creation')) is int:
+                    key += '-creation-%d' % ident['creation']
+                elif ident.get('pid') == pid and re.fullmatch(r'[0-9a-f]{32}', str(ident.get('generation', ''))):
+                    key += '-generation-' + ident['generation']
+                else:
+                    # Legacy PID-only records: a rewrite changes file metadata, distinguishing
+                    # episodes without changing the legacy on-disk format.
+                    try:
+                        st = os.stat(os.path.join(inbox, '.waiter.pid'))
+                    except OSError as e:
+                        raise Unreadable('waiter pid changed while reading (%s)' % type(e).__name__)
+                    key += '-legacy-%d-%d-%d' % (st.st_mtime_ns, st.st_ctime_ns, st.st_size)
             except ValueError:
                 key = 'pid-bad'
             if state == 'ARMED':

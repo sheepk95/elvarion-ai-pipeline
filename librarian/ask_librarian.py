@@ -384,11 +384,18 @@ def wait_late(mb, rid, wait, poll=2.0):
 
 
 def abandon(mb, rid):
-    """On timeout: if nobody claimed the request yet, move it to done/ so the librarian never answers a dead ask."""
-    if not LI.take_claim(mb, rid, "abandoned-by-requester"):
-        return  # the librarian claimed it first; its late answer is moved to done/ by housekeeping
-    LI.move_retry(os.path.join(mb, "requests", rid + ".json"), os.path.join(mb, "done", rid + ".timeout.json"))
-    LI.move_retry(os.path.join(mb, "claimed", rid + ".claim"), os.path.join(mb, "done", rid + ".timeout.claim"))
+    """Legacy API: withdraw an unclaimed request. Current ask() instead preserves it for a late answer."""
+    lock = LI.OsLock(os.path.join(mb, "claimed", rid + ".lock"))
+    if not lock.acquire():
+        return  # a claimer or recovery attempt is handling the request
+    try:
+        if not LI.take_claim(mb, rid, "abandoned-by-requester"):
+            return  # the librarian claimed it first; its late answer is handled by housekeeping
+        if LI.move_retry(os.path.join(mb, "requests", rid + ".json"), os.path.join(mb, "done", rid + ".timeout.json")):
+            LI.move_retry(os.path.join(mb, "claimed", rid + ".claim"), os.path.join(mb, "done", rid + ".timeout.claim"))
+        # A failed request move keeps the abandonment marker for claim recovery.
+    finally:
+        lock.release()
 
 
 def ask(mb, brief, frm="unknown", timeout=DEFAULT_TIMEOUT, poll=0.5, have=None):

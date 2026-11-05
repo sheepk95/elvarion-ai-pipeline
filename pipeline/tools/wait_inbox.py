@@ -27,27 +27,43 @@ a = ap.parse_args()
 seen_path = os.path.join(a.inbox, ".seen")
 seen = set(open(seen_path, encoding="utf-8-sig").read().splitlines()) if os.path.exists(seen_path) else set()
 pid_path = os.path.join(a.inbox, ".waiter.pid")
-with open(pid_path, "w") as fh:
-    fh.write(str(os.getpid()))
-record = identity.register(a.inbox)
+with identity.registration_lock(a.inbox):
+    previous = identity.status(a.inbox)
+    if previous == "UNKNOWN":
+        # A legacy/malformed registration may still name a live process; only
+        # replace it when the OS can prove that PID is gone.
+        try:
+            with open(pid_path) as fh:
+                old_pid = int(fh.read().strip())
+            if not 0 < old_pid <= 0xffffffff or identity.creation(old_pid)[0] != "DEAD":
+                sys.exit("wait_inbox: existing waiter identity unknown; resolve it before re-arming")
+        except (OSError, ValueError):
+            sys.exit("wait_inbox: existing waiter identity unknown; resolve it before re-arming")
+    elif previous == "ARMED":
+        sys.exit("wait_inbox: an existing waiter is still armed")
+    with open(pid_path, "w") as fh:
+        fh.write(str(os.getpid()))
+    record = identity.register(a.inbox)
+
 def cleanup():
-    try:
-        with open(pid_path) as fh:
-            own = fh.read().strip() == str(os.getpid())
-        if own:
-            os.remove(pid_path)
-            if record is not None:
-                identity_path = os.path.join(a.inbox, ".waiter.identity")
-                try:
-                    import json
-                    with open(identity_path, encoding="utf-8") as fh:
-                        same = json.load(fh) == record
-                    if same:
-                        os.remove(identity_path)
-                except (OSError, ValueError):
-                    pass
-    except OSError:
-        pass
+    with identity.registration_lock(a.inbox):
+        try:
+            with open(pid_path) as fh:
+                own = fh.read().strip() == str(os.getpid())
+            if own:
+                os.remove(pid_path)
+                if record is not None:
+                    identity_path = os.path.join(a.inbox, ".waiter.identity")
+                    try:
+                        import json
+                        with open(identity_path, encoding="utf-8") as fh:
+                            same = json.load(fh) == record
+                        if same:
+                            os.remove(identity_path)
+                    except (OSError, ValueError):
+                        pass
+        except OSError:
+            pass
 atexit.register(cleanup)
 end = time.time() + a.timeout
 while time.time() < end:

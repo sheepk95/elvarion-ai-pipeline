@@ -29,7 +29,7 @@ folder holding this file). Where a card, a hand-over note or an old item disagre
   LAST tool call. A new item makes the waiter exit, which wakes the chat. After handling an item, append its file name
   to `<inbox>/.seen`; until then it counts as unread.
 - `send_item.py` prints `WAITER DEAD`, `WAITER STATUS UNKNOWN`, or `NO WAITER FILE` when a waiter cannot be confirmed: tell the coordinator by Q. Legacy PID-only waiters must be re-armed to record their process identity.
-  After an app restart or account switch, `tools/switch_census.py` lists the chats whose waiter died and have unread items.
+  After an app restart or account switch, `tools/switch_census.py --account-pairs <map.json>` lists the chats whose waiter died and have unread items. The required JSON maps the current `CLAUDE_CODE_USER_EMAIL` to its account pair relative path; see `tools/README.md`.
 - **Pins.** Job items and every REVIEW-, TEST- and GATE- file carry `pins: card <sha12> | scorecard <sha12> | work
   <sha12>` from `tools/job_pins.py <job>`. A receiver re-runs it before acting; a differing pin means something changed
   since the sender looked: read what changed first. Before merge, `job_pins.py <job> --check` compares the current

@@ -74,7 +74,7 @@ in its desk file.
    a `[DESK HANDOVER]` line that announces a self-clear (the lane's own resume timer dies with the clear, so the desk
    chat sends the resume message), and a `[DESK UPDATE]` holding `SELF-CLEAR BLOCKED` (the clear may still have gone
    through: check the chat and wake it if needed).
-3. `desk_read.py` prints the new lines and moves the offsets. Log each question in `QUEUE.md`, file each update.
+3. `desk_read.py` prints and flushes the new lines before moving the offsets. A failed output flush leaves them unread for retry. Log each question in `QUEUE.md`, file each update.
 4. Ask the human the questions that need a human (the desk chat is the only chat that does), record the answers in
    `QUEUE.md`, and message them to the lanes.
 5. Re-arm `desk_watch.py`.
@@ -113,3 +113,5 @@ python -B -I desk/tools/test_desk_watch_pipeline.py
 
 `--root` defaults to the folder holding `tools/` (the desk root). The test files run in temporary folders and touch no
 live desk. `test_desk_watch_pipeline.py` drives exit 5 with the real `pipeline/tools/send_item.py` and `wait_inbox.py`.
+
+Exit 5 recovery keys for PID-based waiters now include their process creation identity. Old PID-only recovery entries do not suppress the newly keyed episode; review and record any renewed alert normally. New waiters with unknown creation time use a persisted random registration generation and should be investigated or re-armed. Legacy PID-only records use file metadata to distinguish rewrites; this is best-effort if an external writer preserves identical timestamps and size, so re-arm legacy waiters to obtain a generation.

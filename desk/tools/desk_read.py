@@ -33,9 +33,11 @@ def main():
                 questions += desk_files.kind(line) == 'Q'
                 updates += desk_files.kind(line) == 'U'
         offsets[name] = end
+    print('desk_read: %d new [DESK Q], %d new [DESK UPDATE]%s' % (questions, updates, ' (peek)' if a.peek else ''))
+    # Do not acknowledge content until every byte has reached the output stream.
+    sys.stdout.flush()
     if not a.peek:
         desk_files.save_offsets(p, offsets)
-    print('desk_read: %d new [DESK Q], %d new [DESK UPDATE]%s' % (questions, updates, ' (peek)' if a.peek else ''))
 
 
 if __name__ == '__main__':

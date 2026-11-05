@@ -373,7 +373,7 @@ def under(pid, roots, procs):
 
 def scan_seen(procs, live):
     """[{key, kind, pid, gb, exclusive, yields}] for known GPU programs outside every lease's process tree and outside
-    this command's own ancestry."""
+    the scanner itself."""
     if procs is None:
         return None
     roots = {x['pid'] for x in live if x.get('pid')}
@@ -386,11 +386,7 @@ def scan_seen(procs, live):
                 continue
             if pid > 0 and pid in procs and started is not None and pid_started(pid) == started:
                 roots.add(pid)
-    me = set()
-    p = os.getpid()
-    while p and p not in me:
-        me.add(p)
-        p = procs.get(p, (0,))[0]
+    me = os.getpid()
     def matches(r, v):
         names = r.get('name')
         names = [names] if isinstance(names, str) else names
@@ -398,7 +394,7 @@ def scan_seen(procs, live):
 
     out = []
     for r in SEEN_RULES:
-        hits = {pid for pid, v in procs.items() if pid not in me and matches(r, v) and not under(pid, roots, procs)}
+        hits = {pid for pid, v in procs.items() if pid != me and matches(r, v) and not under(pid, roots, procs)}
         for pid in sorted(hits):
             if under(procs[pid][0], hits, procs):
                 continue  # a child of a program already counted under this rule (Unity workers, Blender children)
