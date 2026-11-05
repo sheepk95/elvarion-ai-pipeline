@@ -14,6 +14,10 @@ TARGET = Path(os.environ.get('LIBRARIAN_RECOVERY_TARGET') or Path(__file__).with
 spec = importlib.util.spec_from_file_location('li_recovery', TARGET)
 li = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(li)
+ask_spec = importlib.util.spec_from_file_location('ask_recovery', Path(__file__).with_name('ask_librarian.py'))
+ask = importlib.util.module_from_spec(ask_spec)
+ask_spec.loader.exec_module(ask)
+ask.LI = li
 RID = '20261105T010000000000Z-1234-0123abcd'
 
 
@@ -97,6 +101,38 @@ finally: lock.release()
         release.touch(); child.wait(timeout=10)
         self.assertEqual([RID], [d['id'] for d in li.claim_all(str(self.mb))])
         self.assertEqual([], li.claim_all(str(self.mb)))
+
+    def test_failed_legacy_abandon_keeps_marker_for_timeout_recovery(self):
+        request = self.mb / 'requests' / (RID + '.json')
+        request.write_text(json.dumps({'brief': 'legacy abandoned request'}))
+        move = li.move_retry
+        def fail_request_move(src, dst, *args, **kwargs):
+            return False if Path(src) == request else move(src, dst, *args, **kwargs)
+        with patch.object(li, 'move_retry', side_effect=fail_request_move):
+            ask.abandon(str(self.mb), RID)
+        claim = self.mb / 'claimed' / (RID + '.claim')
+        self.assertTrue(request.exists())
+        self.assertTrue(claim.exists(), 'failed move discarded the abandonment marker')
+        self.assertTrue(claim.read_text().startswith('abandoned-by-requester'))
+        self.assertEqual([], li.claim_all(str(self.mb)))
+        self.age(claim)
+        self.assertEqual([], li.claim_all(str(self.mb)))
+        self.assertFalse(request.exists())
+        self.assertTrue((self.mb / 'done' / (RID + '.timeout.json')).exists())
+        self.assertTrue((self.mb / 'done' / (RID + '.timeout.claim')).exists())
+        self.assertEqual([], li.unanswered_claimed(str(self.mb)))
+
+    def test_legacy_abandon_obeys_request_lock(self):
+        request = self.mb / 'requests' / (RID + '.json')
+        request.write_text(json.dumps({'brief': 'legacy abandoned request'}))
+        child, release = self.holder(self.mb / 'claimed' / (RID + '.lock'))
+        ask.abandon(str(self.mb), RID)
+        self.assertTrue(request.exists(), 'abandon bypassed the competing request lock')
+        self.assertFalse((self.mb / 'claimed' / (RID + '.claim')).exists())
+        release.touch(); child.wait(timeout=10)
+        ask.abandon(str(self.mb), RID)
+        self.assertFalse(request.exists())
+        self.assertTrue((self.mb / 'done' / (RID + '.timeout.json')).exists())
 
 
 if __name__ == '__main__':

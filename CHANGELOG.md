@@ -14,6 +14,7 @@
   Re-arm existing waiters after upgrading; older clients do not participate in the registration lock protocol.
 - Failed librarian request moves become retryable after the recovery backoff. Per-request OS locks serialize
   claims, and heartbeat writes refuse a busy lock instead of updating without it. Upgrade mailbox clients together.
+  The legacy abandonment helper retains its marker after a failed move and uses the same request lock.
 - GPU admission includes recognized GPU programs in the caller's ancestry. The Windows timeout wrapper contains
   commands in a Job Object before starting them and waits for its processes to terminate before returning.
   Descendants are also terminated when the parent exits normally; restrictive enclosing jobs may refuse startup.
