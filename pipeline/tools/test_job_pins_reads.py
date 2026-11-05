@@ -117,6 +117,17 @@ def t_reads_none_is_no_reads(p):
     need(rc == 0 and 'reads' not in out.lower(), out)
 
 
+def t_none_prefix_is_a_path(p):
+    for name, delimiter in (('none.txt', ' | '), ('none, because contract.txt', ' | '),
+                            ('none, because secret.txt', ' ')):
+        p.put(name, b'changed dependency\n')
+        p.card('\nReads: %s%s000000000000\n\n' % (name, delimiter))
+        rc, out, err = p.run('d-1')
+        need(rc == 0 and 'reads: 000000000000' in out and 'DIFFERS' in out, out)
+        rc, out, err = p.run('d-1', '--check')
+        need(rc == 1 and 'MISMATCH reads' in out, out)
+
+
 def t_print_shows_pins(p):
     line = p.card(rows(p))
     rc, out, err = p.run('d-1')
@@ -285,6 +296,7 @@ TESTS = [
     ('T19 a re-pinned row is a card change', t_card_edit_moves_card_pin),
     ('T20 read_card stays lazy on a bad row', t_bad_row_stops_only_pin_commands),
     ('T21 the usage text states the form', t_help_states_the_form),
+    ('T22 a path beginning none is still checked', t_none_prefix_is_a_path),
 ]
 
 BAD_ROW_RAISE = ('''                if not mr or not _clean(mr.group(1)):
@@ -313,7 +325,9 @@ PLANTS = [
      'print("reads: none")\n    print("next: put this line in your', 'T01'),
     ('card-only: the card always gets a reads line', '" % (c, sc))\n    for x in rl:\n        print(x)\n',
      '" % (c, sc))\n    print("reads: none")\n', 'T02'),
-    ('Reads: none not understood','if len(rows) == 1 and rows[0].lower().startswith("none"):', 'if False:', 'T04'),
+    ('Reads: none not understood', 'if (len(rows) == 1 and not READS_ROW_RE.match(rows[0]) and\n                    re.fullmatch(r"none(?:,\s*because\s+.+)?", rows[0], re.I)):', 'if False:', 'T04'),
+    ('none prefix wrongly ignored', 'if (len(rows) == 1 and not READS_ROW_RE.match(rows[0]) and\n                    re.fullmatch(r"none(?:,\s*because\s+.+)?", rows[0], re.I)):', 'if len(rows) == 1 and rows[0].lower().startswith("none"):', 'T22'),
+    ('none because path ignored', 'if (len(rows) == 1 and not READS_ROW_RE.match(rows[0]) and\n                    re.fullmatch(r"none(?:,\s*because\s+.+)?", rows[0], re.I)):', 'if len(rows) == 1 and re.fullmatch(r"none(?:,\s*because\s+.+)?", rows[0], re.I):', 'T22'),
     ('no DIFFERS flag', '"" if pin == cur else " | DIFFERS: file now %s" % cur', '""', 'T10'),
     ('a wrong sha length', '[(p, s, sha_file(p)[:12])', '[(p, s, sha_file(p)[:11])', 'T07'),
     ('a missing file skipped', 'for p, s in need_reads(card)]', 'for p, s in need_reads(card) if os.path.isfile(p)]',

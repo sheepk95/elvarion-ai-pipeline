@@ -13,6 +13,11 @@ import os
 import re
 import sys
 import time
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("waiter_identity", os.path.join(os.path.dirname(__file__), "waiter_identity.py"))
+identity = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(identity)
 
 ITEM = re.compile(r"^\d{8}T\d{6}Z-.+-\d+\.md$")
 ap = argparse.ArgumentParser()
@@ -24,7 +29,26 @@ seen = set(open(seen_path, encoding="utf-8-sig").read().splitlines()) if os.path
 pid_path = os.path.join(a.inbox, ".waiter.pid")
 with open(pid_path, "w") as fh:
     fh.write(str(os.getpid()))
-atexit.register(lambda: os.path.exists(pid_path) and open(pid_path).read().strip() == str(os.getpid()) and os.remove(pid_path))
+record = identity.register(a.inbox)
+def cleanup():
+    try:
+        with open(pid_path) as fh:
+            own = fh.read().strip() == str(os.getpid())
+        if own:
+            os.remove(pid_path)
+            if record is not None:
+                identity_path = os.path.join(a.inbox, ".waiter.identity")
+                try:
+                    import json
+                    with open(identity_path, encoding="utf-8") as fh:
+                        same = json.load(fh) == record
+                    if same:
+                        os.remove(identity_path)
+                except (OSError, ValueError):
+                    pass
+    except OSError:
+        pass
+atexit.register(cleanup)
 end = time.time() + a.timeout
 while time.time() < end:
     new = sorted(f for f in os.listdir(a.inbox) if ITEM.match(f) and f not in seen)

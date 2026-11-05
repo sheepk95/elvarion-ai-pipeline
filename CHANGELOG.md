@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.3 (2026-11-05): dependency, process identity and animation output fixes
+
+- Job pins no longer mistake a dependency path beginning with `none` for an empty Reads section.
+- Inbox waiters record process creation identity; a reused Python PID cannot establish that the receiver is armed.
+  Restart existing waiters after updating so they write the new identity record.
+- The account-switch census returns a nonzero result when unread work has no matching open chat.
+- Adopted GPU process trees are excluded from unbooked detection only while their recorded creation identity matches.
+  Re-adopt still-running processes from older ledgers after checking their identity; see `gpu-lease/SKILL.md`.
+- Animation runs require a fresh output folder, preserving older takes instead of mixing skipped or leftover frames.
+  An exclusive claim prevents simultaneous runs from sharing that output; failed runs keep the claim for diagnosis.
+  The source converter reads and sorts complete numeric frame indices, including those above 9999.
+- The skill catalogue's standard-library fallback preserves multiline descriptions and `when_to_use` text.
+  Existing catalogues refresh on the next `catalogue-check`.
+- Add CPU regression coverage for these cases. Live desktop wake-ups, GPU admission under load, SAM/Blender inference
+  and animation quality remain separate acceptance checks; this release does not claim those have been verified.
+
 ## v0.1.2 (2026-11-05): fixes from two independent reviews of v0.1.1
 
 A Codex CLI review (GPT-6 Astra, extra-high) and a fresh Opus 5.5 review (extra-high) both rated v0.1.1 ready at

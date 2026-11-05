@@ -111,6 +111,11 @@ per person), `points` (per video frame, per person, the 2D pixel of `hand.l`, `h
   rotations are in MHR axes. `sam_to_source.py` documents the conversion to Blender axes.
 - `run_sam3db.py` exits 1 on an empty `--boxes-json` or when no frame was processed, and 2 when the checkpoint does
   not verify; check the `RUN_DONE` line. The check hashes about 2.4 GB on every run (a few seconds).
+- Use an absent or empty `--out` directory for each take. A nonempty output is refused before checkpoint or model
+  loading so skipped frames cannot reuse results from an earlier take. Existing output files are preserved.
+  An exclusive `.sam3db-claim` marker prevents simultaneous runs from sharing a folder. It remains after failures
+  for diagnosis; choose a new output folder when retrying.
+- The source converter sorts frame filenames by their complete numeric frame index, including indices above 9999.
 
 ## Licence note for the Blender scripts
 

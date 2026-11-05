@@ -71,21 +71,14 @@ pid_p = os.path.join(a.to, ".waiter.pid")
 if os.path.exists(pid_p) and os.name != "nt":
     print("WAITER STATUS UNKNOWN: process liveness check is supported on Windows only")
 elif os.path.exists(pid_p):
-    import ctypes
-    from ctypes import wintypes
-    k = ctypes.windll.kernel32
-    try:
-        h = k.OpenProcess(0x1000, False, int(open(pid_p).read().strip()))
-    except (ValueError, OSError):  # the waiter may delete the file between exists and open
-        h = 0
-    code = wintypes.DWORD()
-    up = bool(h) and k.GetExitCodeProcess(h, ctypes.byref(code)) and code.value == 259
-    if up:      # as switch_census.py: the pid must be a python process, not a reused pid
-        buf, n = ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
-        up = not k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) or "python" in buf.value.lower()
-    if h:
-        k.CloseHandle(h)
-    if not up:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("waiter_identity", os.path.join(os.path.dirname(__file__), "waiter_identity.py"))
+    identity = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(identity)
+    status = identity.status(a.to)
+    if status == "DEAD":
         print("WAITER DEAD: the receiving chat is asleep; tell the Coordinator by Q (the desk chat wakes the Coordinator); tools/switch_census.py names the WAKE id")
+    elif status != "ARMED":
+        print("WAITER STATUS UNKNOWN: re-arm the waiter; tools/switch_census.py names the chat")
 else:
     print("NO WAITER FILE: chat not started or mid-turn")

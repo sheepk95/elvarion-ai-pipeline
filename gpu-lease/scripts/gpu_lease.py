@@ -376,7 +376,16 @@ def scan_seen(procs, live):
     this command's own ancestry."""
     if procs is None:
         return None
-    roots = {p for x in live for p in [x.get('pid')] + list(x.get('pids') or []) if p}
+    roots = {x['pid'] for x in live if x.get('pid')}
+    for lease in live:
+        # Legacy `pids` contain no creation identities and cannot safely establish ownership.
+        for raw_pid, started in (lease.get('adopted_started') or {}).items():
+            try:
+                pid = int(raw_pid)
+            except (TypeError, ValueError):
+                continue
+            if pid > 0 and pid in procs and started is not None and pid_started(pid) == started:
+                roots.add(pid)
     me = set()
     p = os.getpid()
     while p and p not in me:
@@ -700,7 +709,12 @@ def adopt(lid, pid):
         lease = find_active(lid)
         if not lease:
             return None
+        pid = int(pid)
+        started = pid_started(pid) if pid > 0 else None
+        if started is None:
+            raise TelemetryError('cannot adopt pid %s: process creation time unavailable' % pid)
         lease['pids'] = sorted(set(lease.get('pids') or []) | {int(pid)})
+        lease.setdefault('adopted_started', {})[str(pid)] = started
         write_json('active', lid, lease)
         log_event('adopt', lease, pid=int(pid))
         return lease

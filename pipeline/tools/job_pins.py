@@ -188,7 +188,8 @@ def need_reads(card):
                     rows.append(s)
                 elif rows:
                     break
-            if len(rows) == 1 and rows[0].lower().startswith("none"):
+            if (len(rows) == 1 and not READS_ROW_RE.match(rows[0]) and
+                    re.fullmatch(r"none(?:,\s*because\s+.+)?", rows[0], re.I)):
                 continue
             if not rows:
                 raise PinError("the card %s has a Reads: section with no rows (want '- <path> | <sha12>', or 'Reads: "

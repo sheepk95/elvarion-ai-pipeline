@@ -24,7 +24,9 @@ SUITES = {
     "gpu-safety": ["gpu-lease/scripts/test_gpu_safety.py"],
     "visual-review": ["animation/sam3dbody-remap/test_check_review.py"],
     "checkpoint": ["animation/sam3dbody-remap/test_verify_checkpoint.py"],
+    "animation-frames": ["animation/sam3dbody-remap/test_animation_frames.py"],
     "librarian": ["librarian/test_build_index.py"],
+    "catalogue": ["librarian/test_full_catalogue.py"],
     "librarian-inbox": ["librarian/test_librarian_inbox.py"],
     "demo": ["tools/demo_job.py"],
 }

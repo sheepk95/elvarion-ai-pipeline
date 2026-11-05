@@ -26,6 +26,8 @@ Usage (the venv's python; book the GPU first if you share it, see gpu-lease/ in 
       [--focal-mult 1.0] [--boxes auto|"x0,y0,x1,y1;..."] [--boxes-json boxes.json] [--inference full|body]
       [--ckpt-dir <folder>] [--trust-unverified-checkpoint]
 Writes <out>/frames/f<NNNN>.npz, <out>/overlay/f<NNNN>.jpg, <out>/run.json (timings, VRAM peaks, settings).
+The output folder must be absent or empty; use a fresh folder for every run. A persistent .sam3db-claim marker
+reserves it, including after a failed run: inspect that folder and choose another for a retry.
 --boxes-json: per-frame boxes from boxes_from_mask.py or boxes_by_colour.py ({"boxes": {"<video f>": [[x0, y0, x1,
 y1]]}}); frames not in it are skipped. Exits 1 when that file holds no boxes (before the model loads, so no GPU time)
 and when no frame was processed (after run.json is written, for the diagnosis).
@@ -147,6 +149,19 @@ def main():
     ap.add_argument(TRUST_FLAG, action="store_true", dest="trust_unverified",
                     help="DANGEROUS: load the checkpoint without the hash check (files that can run code on load)")
     a = ap.parse_args()
+    out = Path(a.out)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        # Exclusive creation is the cross-process reservation. Never remove it: even a failed
+        # run may have produced data, and a later run must not silently mix with that data.
+        with (out / ".sam3db-claim").open("x", encoding="utf-8") as claim:
+            claim.write("Reserved by run_sam3db.py; use a fresh output folder for each run.\n")
+    except (FileExistsError, NotADirectoryError):
+        sys.exit(f"run_sam3db.py: output {out} is not an empty directory or is already claimed; "
+                 "choose a fresh output folder")
+    if any(p.name != ".sam3db-claim" for p in out.iterdir()):
+        sys.exit(f"run_sam3db.py: output {out} is not an empty directory; choose a fresh output folder "
+                 "(the claim marker is retained)")
     ck = Path(a.ckpt_dir)
     for f in ("model.ckpt", "model_config.yaml", "assets/mhr_model.pt"):
         if not (ck / f).exists():
@@ -162,7 +177,6 @@ def main():
     if per_frame is not None and not per_frame:
         sys.exit(f"run_sam3db.py: {a.boxes_json} has no boxes: nothing to run (did boxes_from_mask.py or "
                  "boxes_by_colour.py find no person?)")
-    out = Path(a.out)
     (out / "frames").mkdir(parents=True, exist_ok=True)
     (out / "overlay").mkdir(parents=True, exist_ok=True)
 

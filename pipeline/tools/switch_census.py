@@ -13,12 +13,13 @@ Usage: python -I -B switch_census.py [--root <pipeline root; default = the paren
   to the folder name of that account's session pair; without it, the pair written last is used.
   --cwd-marker: a chat counts as a pipeline chat when its working folder contains this text (default: the name
   of the pipeline root folder).
-  One line per inbox: chat title, session id (from this account's sidebar list), waiter ARMED / DEAD (pid file, no
-  live python) / NONE (no pid file: the chat is mid-turn, or was stopped mid-turn), unread items and the oldest age.
-  WAKE lines: chats whose waiter is DEAD or NONE and that have unread items (--all: every DEAD or NONE chat). Send each
+  One line per inbox: chat title, session id (from this account's sidebar list), waiter ARMED (matching PID and
+  process creation time), DEAD (process exited or identity differs), UNKNOWN (identity unavailable or legacy PID-only),
+  or NONE (no pid file: the chat is mid-turn, or was stopped mid-turn), unread items and the oldest age.
+  WAKE lines: chats whose waiter is DEAD, UNKNOWN or NONE and that have unread items (--all: every such chat). Send each
   one SendMessage to its id: "wake: account switch; re-read RULES.md 'Account switch', then your inbox; re-arm your
   waiter; if PAUSED, note new items in your HANDOVER note and .seen, and do not re-arm". Exit 0: nothing to wake; 4:
-  WAKE lines printed.
+  WAKE lines printed; 5: unread items have no matching chat (takes precedence over 4).
 """
 import argparse
 import glob
@@ -38,36 +39,15 @@ a = ap.parse_args()
 if os.name != "nt":
     sys.exit("switch_census.py: Windows and the Claude desktop app only (it reads the app's session folder and "
              "checks waiter processes with Windows APIs); wake CLI chats by hand")
-import ctypes                       # after the platform check, so the message above always shows
-from ctypes import wintypes
+import importlib.util
+spec = importlib.util.spec_from_file_location("waiter_identity", os.path.join(os.path.dirname(__file__), "waiter_identity.py"))
+identity = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(identity)
 CWD_MARKER = a.cwd_marker or os.path.basename(os.path.normpath(a.root))
 
 
-def alive(pid):
-    k = ctypes.windll.kernel32
-    h = k.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
-    if not h:
-        return False
-    try:
-        code = wintypes.DWORD()
-        if not k.GetExitCodeProcess(h, ctypes.byref(code)) or code.value != 259:   # STILL_ACTIVE
-            return False
-        buf, n = ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
-        return not k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) or "python" in buf.value.lower()
-    finally:
-        k.CloseHandle(h)
-
-
 def waiter(inbox):
-    p = os.path.join(inbox, ".waiter.pid")
-    if not os.path.exists(p):
-        return "NONE"
-    try:
-        with open(p) as fh:
-            pid = int(fh.read().strip())
-    except (OSError, ValueError):       # the waiter may delete it between exists and open
-        return "DEAD"
-    return "ARMED" if alive(pid) else "DEAD"
+    return identity.status(inbox)
 
 
 def sessions():
@@ -137,7 +117,7 @@ for lane in sorted(glob.glob(os.path.join(a.root, "lanes", "*"))):
     for inbox in sorted(glob.glob(os.path.join(lane, "inbox", "*"))):
         role = os.path.basename(inbox)
         rows.append((inbox, ["%s %s" % (title, role), title]))
-now, wake = time.time(), []
+now, wake, unresolved = time.time(), [], False
 print("account pair %s | %d open pipeline chats in its sidebar list" % (pair, len(chats)))
 for inbox, names in rows:
     if not os.path.isdir(inbox):
@@ -156,10 +136,11 @@ for inbox, names in rows:
                                                    " (oldest %.0f min)" % age if unread else ""))
     if w != "ARMED" and title and (unread or a.all):
         wake.append((title, sid, len(unread)))
-    elif w != "ARMED" and unread and not title:
+    if unread and not title:
         print("   NO CHAT: %s has %d unread items and no open chat titled %s" % (inbox, len(unread), " / ".join(names)))
+        unresolved = True
 for title, sid, n in wake:
     print("WAKE %s %s (%d unread): SendMessage \"wake: account switch; re-read RULES.md 'Account switch', then your inbox;"
           " re-arm your waiter; if PAUSED, note new items in your HANDOVER note and .seen, and do not re-arm\""
           % (sid, title, n))
-sys.exit(4 if wake else 0)
+sys.exit(5 if unresolved else 4 if wake else 0)

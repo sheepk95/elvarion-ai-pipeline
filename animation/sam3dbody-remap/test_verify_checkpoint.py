@@ -124,6 +124,7 @@ class RunnerRefusesBeforeLoad(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix="run-sam3db-guard-test-")
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
+        self.run_number = 0
         self.root = self.tmp / "ckpt"
         for rel, data in FIXTURE.items():
             p = self.root / rel
@@ -149,7 +150,8 @@ class RunnerRefusesBeforeLoad(unittest.TestCase):
             table.update(saved)
 
     def main(self, *extra):
-        argv = ["run_sam3db.py", "--input", str(self.tmp / "take.mp4"), "--out", str(self.tmp / "out"),
+        self.run_number += 1
+        argv = ["run_sam3db.py", "--input", str(self.tmp / "take.mp4"), "--out", str(self.tmp / f"out-{self.run_number}"),
                 "--ckpt-dir", str(self.root), *extra]
         out, err = io.StringIO(), io.StringIO()
         old = sys.argv

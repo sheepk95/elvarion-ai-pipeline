@@ -16,6 +16,10 @@ persistent `.lock` file. Never delete or rename that file while clients are runn
 **Upgrade:** stop all old-version clients before moving a ledger to this version, including long-running services that
 import the module. Older versions rename `.lock` as a stale-lock recovery mechanism and cannot safely share a ledger
 with this version. Restart clients only after they all use the new version. This change does not upgrade running clients.
+Adopted process trees now require a readable process creation time. Existing leases with older bare `pids` no longer
+exclude those processes from unbooked detection: re-run `adopt <lease id> <pid>` for each still-running process after
+checking its identity. Until then it may be counted twice. A process whose creation time cannot be read is not adopted;
+restore process-query access and retry. All clients sharing a ledger must run the updated version for this protection.
 
 ## The rule
 
@@ -55,6 +59,8 @@ variable, so a launcher it starts can `adopt` its own process tree.
 
 Each booking also records its process's start time, so a dead job whose process id the system has handed to a new
 process no longer keeps the booking open (Windows, and Linux with `/proc`; elsewhere the plain pid check applies).
+Adopted roots are treated as booked only while their recorded creation time matches; if it cannot be read during a
+scan, they are counted as unbooked rather than silently covered by the lease.
 
 ## How much to book (`--gb`, peak VRAM)
 
