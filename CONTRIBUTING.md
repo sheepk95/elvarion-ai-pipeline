@@ -2,8 +2,8 @@
 
 Open an issue with the tool name, operating system, Python version, exact command, expected result and actual
 result. Use a temporary reproduction folder and remove credentials, private transcripts and real inbox contents
-from anything you share. For a possible security issue, use GitHub private vulnerability reporting if enabled;
-otherwise open an issue asking for a private reporting channel without disclosing exploit details or secrets.
+from anything you share. Report a possible security issue privately: open the Security tab and choose "Report a
+vulnerability" (see [SECURITY.md](SECURITY.md)). Never put exploit details or secrets in a public issue.
 
 Keep pull requests focused. Explain the failure, the resulting behavior, compatibility changes and validation.
 Add a regression that fails against the old behavior and a control that still succeeds. Concurrency changes need

@@ -99,7 +99,7 @@ Item kinds (`kind:` in the item header; the full list and who sends each is in [
 | BUG | A bug report for a lane's builder. |
 | RESUME, PAUSE | The coordinator wakes or pauses a chat. |
 
-## What is in this repo (v0.1.1)
+## What is in this repo (v0.1.2)
 
 - These docs, including a [quick start](quickstart.md) that runs the tools in a temporary folder first.
 - `pipeline/`: the brief (`PIPELINE.md`), the rules, the coordinator card, the job, gate, grill, hand-over and

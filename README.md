@@ -50,7 +50,8 @@ Integrator (merges) -> player testing with real input
 Start with [docs/overview.md](docs/overview.md).
 
 For a first local run, follow [the quick start](docs/quickstart.md). It checks the tools in a temporary workspace
-before you connect any live chats. [CONTRIBUTING.md](CONTRIBUTING.md) describes the test command and review process.
+before you connect any live chats. [CONTRIBUTING.md](CONTRIBUTING.md) describes the test command and review process, and
+[SECURITY.md](SECURITY.md) explains how to report a vulnerability privately.
 
 ## What's in this repo
 
