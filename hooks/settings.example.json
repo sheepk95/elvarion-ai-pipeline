@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -I -B <PROJECT_ROOT>/hooks/inject_recipe.py session-start",
+            "command": "python -I -B \"<PROJECT_ROOT>/hooks/inject_recipe.py\" session-start",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -I -B <PROJECT_ROOT>/hooks/inject_recipe.py subagent-start",
+            "command": "python -I -B \"<PROJECT_ROOT>/hooks/inject_recipe.py\" subagent-start",
             "timeout": 10
           }
         ]

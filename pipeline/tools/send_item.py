@@ -1,16 +1,20 @@
-"""Write one item into a chat's inbox (11-lane pipeline). Writes <name>.tmp, then renames it to <name>.md.
+"""Write one item into a chat's inbox (11-lane pipeline). Publishes a fully written temporary file without overwriting an existing item.
 
 Usage: python -I -B send_item.py --to <inbox folder> --from <sender> --kind <JOB|REVIEW-ASK|FINDINGS|TEST-ASK|WORKS|NOT-WORKS|GO|READY|Q|UP|DONE|BUG|FAULT|RETEST|PLAY|MERGED|RESUME|PAUSE>
                                  [--refs "<ids>"] (--body "<text>" | --body-file <path>)
 Prints the item id and path. The id is <from>-<UTC>-<n>; the file is <UTC>-<from>-<n>.md.
+A relative --to is resolved against the pipeline root (the parent of tools/), not the current folder.
+Exit 0 sent (a WAITER DEAD / NO WAITER FILE / WAITER STATUS UNKNOWN line is advice, not a failure);
+non-zero: nothing was published (bad argument, missing inbox, or the publish itself failed).
 """
 import argparse
 import os
 import re
 import sys
+import tempfile
 import time
 
-ap = argparse.ArgumentParser()
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 ap.add_argument("--to", required=True)
 ap.add_argument("--from", dest="frm", required=True)
 ap.add_argument("--kind", required=True, choices="JOB REVIEW-ASK FINDINGS TEST-ASK WORKS NOT-WORKS GO READY Q UP DONE BUG FAULT RETEST PLAY MERGED RESUME PAUSE".split())
@@ -21,6 +25,8 @@ g.add_argument("--body-file")
 a = ap.parse_args()
 if not re.fullmatch(r"[A-Za-z0-9 ._-]+", a.frm) or ".." in a.frm:    # --from becomes part of a file name
     sys.exit(f"ERROR: --from {a.frm!r}: use letters, digits, space, dot, dash and underscore only, and no '..'")
+if any(c in a.refs for c in "\r\n\x00"):   # --refs is one header line; a line break could forge another header
+    sys.exit("ERROR: --refs must be a single line (no line breaks)")
 if not os.path.isabs(a.to):     # a relative --to is relative to the pipeline root (parent of tools/), not the cwd
     a.to = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), a.to)
 if not os.path.isdir(a.to):
@@ -33,19 +39,33 @@ if subs:
 body = a.body if a.body is not None else open(a.body_file, encoding="utf-8").read()
 u = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 n = 1
-while os.path.exists(os.path.join(a.to, f"{u}-{a.frm}-{n}.md")):
-    n += 1
-iid, name = f"{a.frm}-{u}-{n}", f"{u}-{a.frm}-{n}.md"
-text = f"id: {iid}\nkind: {a.kind}\nfrom: {a.frm}\nrefs: {a.refs}\n\n{body.rstrip()}\n"
-tmp = os.path.join(a.to, name[:-3] + ".tmp")
-with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
-    fh.write(text)
-os.replace(tmp, os.path.join(a.to, name))
+while True:
+    iid, name = f"{a.frm}-{u}-{n}", f"{u}-{a.frm}-{n}.md"
+    text = f"id: {iid}\nkind: {a.kind}\nfrom: {a.frm}\nrefs: {a.refs}\n\n{body.rstrip()}\n"
+    fd, tmp = tempfile.mkstemp(prefix=".send-item-", suffix=".tmp", dir=a.to)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        try:
+            os.link(tmp, os.path.join(a.to, name))
+        except FileExistsError:
+            n += 1
+            continue
+        break
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError as exc:
+            # Publication is already complete if link() succeeded. A cleanup failure
+            # must not turn a delivered item into a failed send and invite a retry.
+            print(f"WARNING: could not remove temporary file {tmp}: {exc}", file=sys.stderr)
 print(f"sent {iid} -> {os.path.join(a.to, name)}")
 # A .waiter.pid whose process is gone means the receiving chat is asleep (an app restart or account switch killed its
 # waiter): this item will not wake it. tools/switch_census.py names the chat to wake (RULES.md "Account switch").
 pid_p = os.path.join(a.to, ".waiter.pid")
-if os.path.exists(pid_p):
+if os.path.exists(pid_p) and os.name != "nt":
+    print("WAITER STATUS UNKNOWN: process liveness check is supported on Windows only")
+elif os.path.exists(pid_p):
     import ctypes
     from ctypes import wintypes
     k = ctypes.windll.kernel32

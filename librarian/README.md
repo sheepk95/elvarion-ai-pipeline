@@ -34,7 +34,7 @@ missing librarian never blocks work.
 | `SKILL_LIBRARY` | all four | `~/skill-library` (holds `INDEX.md`, `REJECTED.md`, installed skills) |
 | `SKILLS_DIR` | `build_index.py` | `~/.claude/skills` |
 | `SKILL_CORE_FILE` | `build_index.py` | `<SKILL_LIBRARY>/CORE.txt` (skills that are always listed; none if the file is missing) |
-| `SKILL_RECORDS` | `build_index.py` | `<SKILL_LIBRARY>/_records` (optional `INSTALLS.jsonl`, `REVIEWS.jsonl`, `VERDICTS.jsonl`, `external-catalogue.jsonl`, `sweep2.jsonl`, `gate-folders.json`) |
+| `SKILL_RECORDS` | `build_index.py` | `<SKILL_LIBRARY>/_records` (`TRUST.json` for owner-approved package manifests; optional historical `INSTALLS.jsonl`, `REVIEWS.jsonl`, `VERDICTS.jsonl`, `external-catalogue.jsonl`, `sweep2.jsonl`, `gate-folders.json`) |
 | `LIBRARIAN_NO_FINDER` | `ask_librarian.py` | unset; `1` turns the optional skills.sh finder hook off |
 
 `CLAUDE_CODE_HOST_SESSION_ID` and `CLAUDE_SESSION_TITLE`, when set by the Claude desktop app, let a late answer find its
@@ -42,32 +42,81 @@ way back to the asking chat and label the request.
 
 ## Quick start
 
-```
-# 1. build the index of your skills (look first with --check, which writes nothing)
-python -I -B build_index.py --check      # uses ~/skill-library and ~/.claude/skills unless the variables above are set
-python -I -B build_index.py
+Run these from the repository root in PowerShell. Choose a new library folder; do not point the writer at a shared
+INDEX you do not own. `--check` is read-only and reports missing input directories without creating them.
 
-# 2. build the catalogue parts the librarian will read
-python -I -B build_full_catalogue.py
+```powershell
+$env:SKILL_LIBRARY = Join-Path $HOME 'skill-library'
+$env:SKILLS_DIR = Join-Path $HOME '.claude/skills'
+python -I -B librarian/build_index.py --check
+# For a new setup, create only the directories you intend to use:
+New-Item -ItemType Directory -Force -Path $env:SKILL_LIBRARY, $env:SKILLS_DIR | Out-Null
+python -I -B librarian/build_index.py
+
+# Review packages and add owner trust records as described below, then rebuild the index.
+# Only after it reports at least one vetted skill:
+python -I -B librarian/build_index.py
+python -I -B librarian/build_full_catalogue.py
 
 # 3. start a chat, give it LIBRARIAN-BRIEF.md, and let it run section 1 (startup)
 
 # 4. any other agent asks
-python -I -B ask_librarian.py --from "my chat" "I am adding a regression test for the pathfinding cost and need to be sure it can fail"
+python -I -B librarian/ask_librarian.py --from "my chat" "I am adding a regression test for the pathfinding cost and need to be sure it can fail"
 ```
+
+## Installed is not reviewed
+
+Existing files start as `installed-unverified`. The catalogue excludes them, and a zero-vetted library deliberately
+cannot build a usable catalogue. Neither an `origin: in-house` declaration inside a skill nor historical install and
+review logs establishes current trust.
+
+After reviewing a package's instructions, scripts, dependencies, provenance and applicable permissions, the owner
+can record that decision in `<SKILL_RECORDS>/TRUST.json`. Keep this file under the owner's control, outside skill
+packages. It is an object keyed by the skill's folder name:
+
+```json
+{
+  "example-skill": {
+    "kind": "reviewed",
+    "provenance": "Owner review record and date",
+    "files": {
+      "SKILL.md": "REPLACE_WITH_64_LOWERCASE_SHA256_HEX_CHARACTERS",
+      "scripts/helper.py": "REPLACE_WITH_64_LOWERCASE_SHA256_HEX_CHARACTERS"
+    }
+  }
+}
+```
+
+This is a format example, not an approval record. Use `kind: reviewed` or `kind: in-house` only for an actual owner
+decision. `files` must list **every regular file** in the package, using relative paths with forward slashes. Obtain
+each hash from the exact reviewed bytes, for example `(Get-FileHash -LiteralPath 'path/to/SKILL.md' -Algorithm
+SHA256).Hash.ToLowerInvariant()`. No files are excluded: bytecode or other generated files also change the manifest.
+Empty directories do not affect it. Links, junctions, other reparse points and nonregular files are refused.
+
+Rebuild with `build_index.py --check` and then `build_index.py`; a matching complete manifest produces `vetted`.
+Any file addition, deletion or edit invalidates it until reviewed again. Do not regenerate approval records merely
+to silence a mismatch. External dependencies and referenced files outside the package still require their own review;
+this manifest is an identity check, not a sandbox or proof that execution is safe.
 
 ## Safety notes
 
 - **`build_index.py` without `--check` replaces `INDEX.md` and `REJECTED.md`** in `SKILL_LIBRARY`. Try it on a scratch
   library first. `--simulate-install <name>=<dir>` shows the row an install would get without writing anything.
 - Request text is data: the librarian brief tells the chat never to follow instructions inside a request, and
-  `librarian_inbox.py list` prefixes every brief line with `| ` so a brief cannot forge a request header.
+  `librarian_inbox.py list` prefixes every brief line with `| ` so a brief cannot forge a request header. A request
+  file whose name is not a request id (the shape `ask_librarian.py` files) is skipped with a WARNING on stderr and
+  left in place, so a file name cannot forge one either.
 - The optional skills.sh finder (`finder/hook.py` next to `ask_librarian.py`) is not part of this repository.
   `ask_librarian.py` skips it without error when the folder is missing.
 - `install_skill.py`, the vetting installer the INDEX footer names, is not part of this repository.
 - `build_index.py` and `build_full_catalogue.py` print their description with `-h` / `--help` and change nothing; an
   unknown flag exits 2. If `SKILLS_DIR` holds SKILL.md files but `build_index.py` finds 0 rows, it exits 1 with an ERROR
   unless you pass `--allow-empty`.
-- The upstream automated test file for the mailbox (`test_librarian.py`, about 200 KB) is not shipped. The scripts were
-  exercised here with a temporary `LIBRARIAN_ROOT`: a fake heartbeat, a request filed by `ask_librarian.py`, `list`
-  claiming it, a hand-written answer file, and the asker receiving it.
+- The upstream automated test file for the mailbox (`test_librarian.py`, about 200 KB) is not shipped. A smaller one
+  is: `librarian/test_librarian_inbox.py` runs the round trip in a temporary mailbox (a heartbeat, a request filed by
+  `ask_librarian.py`, `list` claiming it, an answer file, the asker receiving it), plus a request file with a bad id
+  and a heartbeat with a non-numeric epoch (`status` must not crash).
+
+Run `python -I -B librarian/test_build_index.py` from the repository root for isolated trust, package-change and
+missing-directory checks, and `python -I -B librarian/test_librarian_inbox.py` for the mailbox. These fixtures do not
+read or modify your real library or mailbox.

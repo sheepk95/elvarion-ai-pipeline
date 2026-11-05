@@ -29,6 +29,11 @@ add-on and your own rig, and the rig, bone and take names inside them are this p
   loading such a file can run code. `verify_checkpoint.py` checks the files against the ids Meta publishes for that repo
   (sha256 for the two big files). Run it after every download, from any source, and load nothing unless it prints
   `ALL_MATCH`. Meta's ids are a snapshot: compare with the live Hugging Face page if the repo has been updated.
+  `run_sam3db.py` runs the same check itself before it imports torch or Meta's code, and exits 2 on any missing,
+  wrong-size or wrong-hash file (a wrong size fails before hashing). Only `--trust-unverified-checkpoint` skips it:
+  that flag is dangerous, prints a warning and is recorded in `run.json` (`"checkpoint_verified": false`). Limits: the
+  check reads the files at their paths, so a process that can replace them between the check and the load can still
+  win; it covers the weights only, and Meta's code in your clone must be trusted separately.
 - Pick the **ViT-H checkpoint**, not the DINOv3 one: the DINOv3 backbone fetches and runs unpinned code from GitHub at
   every load (`torch.hub.load(..., source="github")`), the ViT-H one runs only the code in your clone.
 
@@ -39,12 +44,12 @@ MiniMax, a paid service), `render_views.py` (Blender code written around one rig
 
 | File | What it does | Needs |
 |---|---|---|
-| `install_venv.sh` | Builds a Python 3.11 venv with the core inference packages (torch CUDA 12.6 wheels). It writes the freeze it made to `requirements-freeze.txt` inside the venv; the tracked `requirements-installed.txt` is the freeze from one tested run. | Meta's clone in `./src`; Python 3.11 |
+| `install_venv.sh` | Builds a Python 3.11 venv with the core inference packages (torch CUDA 12.6 wheels). By default it installs the latest version of each package (not reproducible). `PINNED=1 bash install_venv.sh` installs the exact versions in the tracked `requirements-installed.txt` instead: the freeze from one tested run on Windows x64 with CPython 3.11 and torch 2.14.1+cu126 (versions only, no hashes; other platforms may lack some wheels). Either way it writes what it installed to `requirements-freeze.txt` inside the venv. | Meta's clone in `./src`; Python 3.11 |
 | `get_checkpoint.sh` | Downloads the ViT-H files with the `hf` command. | Your own Hugging Face access to the gated repo |
-| `verify_checkpoint.py` | Hash check of the downloaded files against Meta's published ids. | stdlib |
+| `verify_checkpoint.py` | Size and hash check of the downloaded files against Meta's published ids; `run_sam3db.py` calls it before loading. | stdlib |
 | `run_sam3db.py` | Video or picture in, per frame out: `frames/fNNNN.npz` (skeleton, keypoints, camera), `overlay/fNNNN.jpg`, `run.json`. | venv, GPU (about 3.4 GB, about 0.5 s a frame on an RTX 3090) |
 | `boxes_from_mask.py` | Per-frame person boxes from a subject-mask video plus its crop file. | cv2, numpy |
-| `boxes_by_colour.py` | Per-man boxes for a two-person take with no mask, by learning each man's colours. | cv2, numpy |
+| `boxes_by_colour.py` | Per-person boxes for a two-person take with no mask, by learning each person's colours (`--names`, default `person_a,person_b`; `--split-x`, default half the frame width). | cv2, numpy |
 | `keyframe_sheet.py` | Labelled key-frame sheet of a take; `--boxes name=boxes.json` draws the boxes on it. | cv2, numpy |
 | `overlay_sheet.py` | Close-up sheet of SAM's overlays around one person. | cv2, numpy |
 | `facing_scan.py` | Finds left/right flips (SAM turning a body 180 degrees) in a run. | numpy, `SAM3DB_SRC` |
@@ -77,7 +82,7 @@ it**: see [`gpu-lease/`](../../gpu-lease/) in this repo):
 ```
 bash install_venv.sh                       # after cloning Meta's repo into ./src
 bash get_checkpoint.sh                     # needs your own Hugging Face access
-python -I -B verify_checkpoint.py          # must print ALL_MATCH before anything loads the weights
+python -I -B verify_checkpoint.py          # must print ALL_MATCH; run_sam3db.py also refuses (exit 2) otherwise
 python -I -B keyframe_sheet.py take.mp4 $REMAP_ROOT/keys.png "0:start" "24:swing" "48:end"
 python -B run_sam3db.py --input take.mp4 --out $REMAP_ROOT/sam --every 2
 python -I -B facing_scan.py $REMAP_ROOT/sam          # left/right flips?
@@ -104,7 +109,8 @@ per person), `points` (per video frame, per person, the 2D pixel of `hand.l`, `h
   relative to each rig's rest, so the two rests must be made to match (that is what `build_source_blender.py` does).
 - MHR returns **centimetres**; its joint coordinates are in camera axes (the MHR axes with y and z negated), its joint
   rotations are in MHR axes. `sam_to_source.py` documents the conversion to Blender axes.
-- `run_sam3db.py` exits 1 on an empty `--boxes-json` or when no frame was processed; check the `RUN_DONE` line.
+- `run_sam3db.py` exits 1 on an empty `--boxes-json` or when no frame was processed, and 2 when the checkpoint does
+  not verify; check the `RUN_DONE` line. The check hashes about 2.4 GB on every run (a few seconds).
 
 ## Licence note for the Blender scripts
 
@@ -113,6 +119,16 @@ GPLv3-compatible; a Blender add-on built and redistributed from them is GPL.
 
 ## Tests
 
-CPU only, stdlib: `python -m py_compile` on every script. `check_review.py` was exercised in a temporary folder with a
-generated copy of the example checklist (a good copy passes; an unopened picture, a look item with no `see:` line and a
-missing item each fail). SAM, torch, Blender and the GPU were not run for this repo.
+CPU only, stdlib: `python -I -B test_verify_checkpoint.py` checks the checkpoint guard on small fixture files whose
+ids are hard-coded constants (all good passes; same-size changed bytes, wrong size and a missing file fail), and drives
+`run_sam3db.py`'s `main()` with torch, cv2, numpy and `sam_3d_body` blocked to show a bad checkpoint is refused before
+any of them is imported.
+
+`python -I -B test_check_review.py` uses temporary fixtures. It includes zero-picture/all-N/A
+refusal, individual N/A with sufficient image evidence, and invalid minimum/absent-file diagnostics. The minimum
+picture count applies even when every look item is marked N/A and cannot be set to zero. Transcript evidence shows
+that image files were opened, not that the reviewer understood them; the human animation gate still matters.
+
+The repository check runner parses the Python sources without importing Blender or model packages. SAM, torch,
+Blender and actual animation quality require separate runs. The local Meta clone at `src/` is ignored by Git; keep
+third-party source and weights out of this repository's release.

@@ -103,7 +103,9 @@ def t_card_only_no_reads(p):
 def t_check_no_reads(p):
     line = p.card()
     rc, out, err = p.run('d-1', '--check')
-    need(rc == 0 and out == 'pins OK: %s\nnext: send DONE / READY with this pins line (Integrator: merge)\n' % line,
+    need(rc == 0 and out == ('pins OK: %s\nnext: send DONE / READY with this pins line. Matching pins prove only that '
+                             'the records name the same card, scorecard and work; they are not a gate PASS or the '
+                             "owner's GO: the integrator checks both before any merge\n") % line,
          'output changed: %r' % out)
 
 

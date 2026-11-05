@@ -99,12 +99,13 @@ Item kinds (`kind:` in the item header; the full list and who sends each is in [
 | BUG | A bug report for a lane's builder. |
 | RESUME, PAUSE | The coordinator wakes or pauses a chat. |
 
-## What is in this repo (v0.1)
+## What is in this repo (v0.1.1)
 
-- These docs.
-- `pipeline/`: the brief (`PIPELINE.md`), the rules, the coordinator card, the job and gate templates, an example lane
-  charter, a worked example with fake content, and four tools in `pipeline/tools/`: `send_item.py`, `wait_inbox.py`,
-  `switch_census.py`, `job_pins.py`.
+- These docs, including a [quick start](quickstart.md) that runs the tools in a temporary folder first.
+- `pipeline/`: the brief (`PIPELINE.md`), the rules, the coordinator card, the job, gate, grill, hand-over and
+  tried-and-failed templates, an example lane charter, a worked example with fake content, and four tools in
+  `pipeline/tools/`: `send_item.py`, `wait_inbox.py`, `switch_census.py`, `job_pins.py`, each with tests.
+- `tools/`: `run_checks.py` (every offline check) and `demo_job.py` (one job end to end in a temporary folder).
 - `desk/`: the desk's file tools.
 - `gpu-lease/`: the GPU booking ledger tool.
 - `librarian/`: the skill librarian's tools.

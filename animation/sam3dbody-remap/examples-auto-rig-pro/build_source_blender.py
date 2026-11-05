@@ -1,9 +1,9 @@
 # EXAMPLE CODE. Needs Blender, the PAID Auto-Rig Pro add-on (not included, bought separately) and your own rig.
-# Rig, bone and take names below (ARP_HighElf, SAM_victim, ...) are this project's examples: change them.
+# Rig and armature names below (ARP_target, SAM_source, ...) are placeholders: pass your own with --name / --target.
 # Build SAM 3D Body's skeleton as a Blender source armature in the target rig's own rest pose, and key its motion
 # (step 5 of the remap, after sam_to_source.py has cleaned the motion).
 #
-# Why: SAM's body model rests in an A-pose (arms 48 deg down, forearms forward); ARP_HighElf rests in a T-pose. ARP
+# Why: SAM's body model rests in an A-pose (arms 48 deg down, forearms forward); the target rig here rests in a T-pose. ARP
 # Remap transfers rotation relative to each rig's rest, so the rests must match. Each source bone therefore gets the
 # REST ORIENTATION of the ARP bone it maps to (MAP below) and SAM's bone LENGTH. Per frame, bone j's world frame is
 #   W_j(t) = G_j(t) G_j(rest)^T Q_j S_j
@@ -21,9 +21,9 @@
 #   the hand. Wrist and finger positions do not move (the turn is about the bone's own axis).
 # - FINGERS: a source made with sam_to_source.py --hands also gets SAM's 15 finger joints per hand, mapped to
 #   c_<finger>1-3.<side>; the last segment borrows the one before it for its direction.
-# blender -b <working copy with ARP_HighElf> --disable-autoexec --python build_source_blender.py --
-#     <source.npz> <out.blend> [--name SAM_victim] [--origin auto|x,y] [--stand 0-20] [--palm on|off] [--roll on|off]
-#     [--target ARP_HighElf]   (the name of your Auto-Rig Pro target armature in the working copy)
+# blender -b <working copy with your ARP rig> --disable-autoexec --python build_source_blender.py --
+#     <source.npz> <out.blend> [--name SAM_source] [--origin auto|x,y] [--stand 0-20] [--palm on|off] [--roll on|off]
+#     [--target ARP_target]   (the name of your Auto-Rig Pro target armature in the working copy)
 import bpy, json, math, sys
 import numpy as np
 from mathutils import Matrix, Vector
@@ -65,7 +65,7 @@ for s in ("l", "r"):
         for f, i in FINGERS:
             MAP[f"{s}_{f}{i}"] = f"c_{f}{i}.{s}"
             DIR[f"{s}_{f}{i}"] = (f"{s}_{f}{i}", f"{s}_{f}{i + 1}") if i < 3 else (f"{s}_{f}2", f"{s}_{f}3")
-tgt = bpy.data.objects[opt.get("--target", "ARP_HighElf")]
+tgt = bpy.data.objects[opt.get("--target", "ARP_target")]
 tb = tgt.data.bones
 missing = [b for b in MAP.values() if b not in tb]
 if missing:
@@ -76,11 +76,11 @@ def tgt_rest(bname):
     return (TW @ tb[bname].matrix_local.to_3x3()).normalized()
 
 # scale: target-rig leg (thigh head -> foot head) over SAM leg
-elf_leg = (tb["c_thigh_fk.l"].head_local - tb["c_leg_fk.l"].head_local).length + \
+tgt_leg = (tb["c_thigh_fk.l"].head_local - tb["c_leg_fk.l"].head_local).length + \
           (tb["c_leg_fk.l"].head_local - tb["c_foot_fk.l"].head_local).length
 J = {n: i for i, n in enumerate(names)}
 sam_leg = np.linalg.norm(Pr[J["l_upleg"]] - Pr[J["l_lowleg"]]) + np.linalg.norm(Pr[J["l_lowleg"]] - Pr[J["l_foot"]])
-k = elf_leg / sam_leg
+k = tgt_leg / sam_leg
 
 def unit(v):
     v = Vector(v)
@@ -148,10 +148,10 @@ for n in names:  # names are parent-first
 lo = [i for i, f in enumerate(vf) if stand[0] <= f <= stand[1]]
 joints_raw = d["joints_raw"] * k
 ankle_z = np.median([min(joints_raw[i, J["l_foot"], 2], joints_raw[i, J["r_foot"], 2]) for i in lo])
-elf_ankle = (tgt.matrix_world @ tb["c_foot_fk.l"].head_local).z
+tgt_ankle = (tgt.matrix_world @ tb["c_foot_fk.l"].head_local).z
 og = opt.get("--origin", "auto")
 ox, oy = (root[0, 0] * k, root[0, 1] * k) if og == "auto" else (float(og.split(",")[0]), float(og.split(",")[1]))
-shift = Vector((-ox, -oy, elf_ankle - ankle_z))
+shift = Vector((-ox, -oy, tgt_ankle - ankle_z))
 
 # Rest placement. ARP Remap moves the target root to (source root head + target rest head - source rest head), a
 # fixed WORLD offset that does not turn with the hips (auto_rig_remap.py _retarget, *_ROOT_OFFSET). So the source root
@@ -286,7 +286,7 @@ if max(play_mm) > 1.0 or max(play_deg) > 0.1:
     raise SystemExit(f"STOP: Blender playback differs from the computed pose: max {max(play_mm):.2f} mm, "
                      f"{max(play_deg):.3f} deg")
 bpy.ops.wm.save_as_mainfile(filepath=out_blend, copy=False)
-rep = {"source": src, "out": out_blend, "armature": NAME, "scale_k": round(k, 4), "elf_leg_m": round(elf_leg, 4),
+rep = {"source": src, "out": out_blend, "armature": NAME, "scale_k": round(k, 4), "elf_leg_m": round(tgt_leg, 4),
        "sam_leg_m": round(float(sam_leg), 4), "floor_shift_z": round(shift.z, 4), "origin_xy": [round(ox, 3), round(oy, 3)],
        "frames": [int(vf[0]) + 1, int(vf[-1]) + 1], "keys": len(vf), "fps": 24,
        "shift": [round(v, 4) for v in shift], "camera_world": [round(v, 4) for v in shift],

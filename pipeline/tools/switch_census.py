@@ -37,6 +37,9 @@ ap.add_argument("--all", action="store_true")
 ap.add_argument("--account-pairs", default="")
 ap.add_argument("--cwd-marker", default="")
 a = ap.parse_args()
+if os.name != "nt":
+    sys.exit("switch_census.py: Windows and the Claude desktop app only (it reads the app's session folder and "
+             "checks waiter processes with Windows APIs); wake CLI chats by hand")
 CWD_MARKER = a.cwd_marker or os.path.basename(os.path.normpath(a.root))
 
 
@@ -68,10 +71,14 @@ def waiter(inbox):
 def sessions():
     """Open chats in THIS account's sidebar list: title -> local id. The account's pair comes from the optional
     --account-pairs map (account e-mail -> pair folder), else the pair written last."""
-    roots = glob.glob(os.path.join(os.environ["LOCALAPPDATA"], "Claude-Data", "claude_*", "claude-code-sessions"))
+    # Undocumented desktop-app storage: the layout may change between app versions, and CLI sessions are not listed.
+    base = os.environ.get("LOCALAPPDATA", "")
+    roots = glob.glob(os.path.join(base, "Claude-Data", "claude_*", "claude-code-sessions")) if base else []
     if len(roots) != 1:
         return {}, "(no single session root)"
     pairs = [d for d in glob.glob(os.path.join(roots[0], "*", "*")) if glob.glob(os.path.join(d, "local_*.json"))]
+    if not pairs:
+        return {}, "(no session pair holds any chat)"
     amap_p = a.account_pairs
     amap = json.load(open(amap_p, encoding="utf-8")) if amap_p and os.path.exists(amap_p) else {}
     email = os.environ.get("CLAUDE_CODE_USER_EMAIL", "")
@@ -82,7 +89,12 @@ def sessions():
     out = {}
     for f in glob.glob(os.path.join(pair, "local_*.json")):
         cid = os.path.basename(f)[:-5]
-        j = json.load(open(f, encoding="utf-8"))
+        try:
+            with open(f, encoding="utf-8") as fh:
+                j = json.load(fh)
+        except (OSError, ValueError) as e:   # one unreadable session file must not hide every other chat
+            print("WARNING: skipped unreadable session file %s: %s" % (f, e))
+            continue
         if cid not in arch and not j.get("isArchived") and CWD_MARKER in (j.get("cwd") or ""):
             out[j.get("title") or ""] = cid
     return out, os.path.relpath(pair, roots[0])

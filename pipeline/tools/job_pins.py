@@ -247,6 +247,9 @@ def work_state(card, override=None):
         br = git(w["worktree"], "rev-parse", "--abbrev-ref", "HEAD")
         if br != w["branch"]:
             raise PinError("worktree %s is on branch %s; the card says %s" % (q(w["worktree"]), br, w["branch"]))
+        dirty = git(w["worktree"], "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none")
+        if dirty:
+            raise PinError("worktree %s has tracked or untracked changes; commit or clean them before pinning current work" % q(w["worktree"]))
         return "commit", git(w["worktree"], "rev-parse", "HEAD")
     shas = [sha_file(f) for f in w["files"]]
     return "file", shas[0] if len(shas) == 1 else sha_bytes("\n".join(shas).encode("ascii"))
@@ -278,8 +281,6 @@ def find_pins(path, top=5):
         m = PINS_RE.match(ln.strip())
         if m and m.groups() not in found:
             found.append(m.groups())
-            if top is not None:
-                break
     if len(found) > 1:
         raise PinError("%s holds %d different pins lines; an item carries exactly one" % (q(path), len(found)))
     return found[0] if found else None
@@ -302,16 +303,14 @@ def same_work(a, b):
     return a == b
 
 
-def older_gate_works(card, newest_gate):
-    """Work pins of the job's GATE files other than the newest (a skipped tester must have tested some gate's work)."""
-    out = []
-    for f in sorted(os.listdir(card["dir"])):
-        p = os.path.join(card["dir"], f)
-        if re.match(r"^GATE-\d+\.md$", f) and os.path.normcase(p) != os.path.normcase(newest_gate):
-            fp = find_pins(p)
-            if fp:
-                out.append(fp[2])
-    return out
+def scoped_prior_pins(card, gate_path, scoped):
+    """Resolve only the earlier gate explicitly named by this scoped re-gate."""
+    current = re.fullmatch(r"GATE-(\d+)\.md", os.path.basename(gate_path))
+    number = int(scoped.group(1))
+    if not current or number >= int(current.group(1)):
+        return None
+    prior = os.path.join(card["dir"], "GATE-%d.md" % number)
+    return find_pins(prior) if os.path.isfile(prior) else None
 
 
 # >>> COMMANDS
@@ -343,7 +342,7 @@ def cmd_check(root, job, ready):
     jd = card["dir"]
     recs = [("REVIEW", newest(jd, "REVIEW")), ("TEST", newest(jd, "TEST")), ("GATE", newest(jd, "GATE"))]
     missing = []
-    for name, p in recs[1:]:
+    for name, p in recs:
         if p is None:
             missing.append(("MISSING %s-<n>.md in %s: none found (nothing to check is never a pass)" % (name, q(jd)),
                             os.path.join(jd, "%s-<n>.md" % name)))
@@ -370,16 +369,20 @@ def cmd_check(root, job, ready):
     gp = pins["GATE"]
     with open(dict(recs)["GATE"], "rb") as fh:     # a skipped tester is a scoped re-gate's own line
         gtxt = fh.read(4000).decode("utf-8-sig", errors="replace")[:2000]
-    scoped = re.search(r"(?m)^#?\s*SCOPED RE-GATE of GATE-\d+", gtxt)
+    scoped = re.search(r"(?m)^#?\s*SCOPED RE-GATE of GATE-(\d+)\s*$", gtxt)
     skip = re.search(r"(?m)^tester not re-run: .+", gtxt)
     bad, notes = [], []
     for name in ("REVIEW", "TEST", "READY"):
-        if name in pins and not same_work(pins[name][2], gp[2]):
-            if (name == "TEST" and scoped and skip and
-                    any(same_work(pins[name][2], x) for x in older_gate_works(card, dict(recs)["GATE"]))):
-                notes.append("TEST older than GATE: tester not re-run: %s" % skip.group(0).strip())
-            else:
-                bad.append("MISMATCH work %s vs GATE: %s vs %s" % (name, pins[name][2], gp[2]))
+        if name not in pins or pins[name] == gp:
+            continue
+        if (name == "TEST" and scoped and skip and pins[name][:2] == gp[:2] and
+                pins[name] == scoped_prior_pins(card, dict(recs)["GATE"], scoped)):
+            notes.append("TEST older than GATE: tester not re-run: %s" % skip.group(0).strip())
+            continue
+        for index, field in enumerate(("card", "scorecard", "work")):
+            if pins[name][index] != gp[index]:
+                bad.append("MISMATCH %s %s vs GATE: %s vs %s" %
+                           (field, name, pins[name][index], gp[index]))
     if gp[0] != cur_c:
         bad.append("MISMATCH card GATE vs JOB.md now: %s vs %s (read the newest JOB.md.pre-* copy)" % (gp[0], cur_c))
     if gp[1] != cur_s:
@@ -409,7 +412,9 @@ def cmd_check(root, job, ready):
     print("pins OK: pins: card %s | scorecard %s | work %s" % gp)
     if rs:
         print("reads OK: %d pinned file(s) match the card" % len(rs))
-    print("next: send DONE / READY with this pins line (Integrator: merge)")
+    print("next: send DONE / READY with this pins line. Matching pins prove only that the records name the "
+          "same card, scorecard and work; they are not a gate PASS or the owner's GO: the integrator checks both "
+          "before any merge")
     return 0
 # <<< COMMANDS
 

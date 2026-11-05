@@ -5,9 +5,16 @@ time and saves, per frame, the MHR skeleton (127 joint positions + global rotati
 3D, the camera translation and the raw MHR parameters. Also writes an overlay of the 2D keypoints on each processed
 frame so a person can check the fit.
 
-Our AI-video takes are plain grey backgrounds, so the person box comes from background subtraction (no person
-detector). One person per box: --boxes auto (one box around all foreground) or --boxes "x0,y0,x1,y1;x0,y0,x1,y1"
-(one per man).
+This kit assumes takes on a plain, uniform background, so the person box comes from background subtraction (no
+person detector). One person per box: --boxes auto (one box around all foreground) or --boxes "x0,y0,x1,y1;x0,y0,x1,y1"
+(one per person).
+
+Checkpoint check (fail closed): model.ckpt and mhr_model.pt are pickle / TorchScript and can run code when loaded, so
+before torch, cv2 or Meta's code is even imported the script runs verify_checkpoint.verify() on --ckpt-dir and exits 2
+unless every file matches Meta's published size and hash. --trust-unverified-checkpoint skips that check: DANGEROUS,
+only for files you have checked some other way; it prints a warning and run.json records "checkpoint_verified": false.
+Limit: the check reads the files at those paths; a process that swaps them after the check can still win, and Meta's
+code in your clone must be trusted separately.
 
 Environment (all optional):
   SAM3DB_SRC         folder holding your clone of facebookresearch/sam-3d-body (default: ./src beside this script)
@@ -17,29 +24,59 @@ Environment (all optional):
 Usage (the venv's python; book the GPU first if you share it, see gpu-lease/ in this repo):
   python -B run_sam3db.py --input <video.mp4 | picture.png> --out <folder> [--every 1] [--max-frames N]
       [--focal-mult 1.0] [--boxes auto|"x0,y0,x1,y1;..."] [--boxes-json boxes.json] [--inference full|body]
-      [--ckpt-dir <folder>]
+      [--ckpt-dir <folder>] [--trust-unverified-checkpoint]
 Writes <out>/frames/f<NNNN>.npz, <out>/overlay/f<NNNN>.jpg, <out>/run.json (timings, VRAM peaks, settings).
 --boxes-json: per-frame boxes from boxes_from_mask.py or boxes_by_colour.py ({"boxes": {"<video f>": [[x0, y0, x1,
 y1]]}}); frames not in it are skipped. Exits 1 when that file holds no boxes (before the model loads, so no GPU time)
 and when no frame was processed (after run.json is written, for the diagnosis).
---focal-mult scales the model's default focal length (image diagonal); our frames are orthographic renders, so a
-value above 1 (narrower lens) is closer to the truth, but the model was trained on ordinary lenses: compare both.
+--focal-mult scales the model's default focal length (image diagonal); for orthographic or long-lens renders a value
+above 1 (narrower lens) is closer to the truth, but the model was trained on ordinary lenses: compare both.
 """
 import argparse, json, os, sys, time
 from pathlib import Path
 
-import cv2
-import numpy as np
-import torch
-
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, os.environ.get("SAM3DB_SRC", str(HERE / "src")))
-from sam_3d_body import SAM3DBodyEstimator, load_sam_3d_body  # noqa: E402
-from sam_3d_body.metadata.mhr70 import pose_info  # noqa: E402
+if str(HERE) not in sys.path:  # verify_checkpoint.py sits beside this script (also under python -I)
+    sys.path.insert(0, str(HERE))
+import verify_checkpoint  # noqa: E402  (stdlib only)
 
-NAME2ID = {v["name"]: k for k, v in pose_info["keypoint_info"].items()}
-LINKS = [(NAME2ID[a], NAME2ID[b], tuple(int(c) for c in d["color"][::-1]))  # RGB -> BGR for cv2
-         for d in pose_info["skeleton_info"].values() for a, b in [d["link"]] if a in NAME2ID and b in NAME2ID]
+# torch, cv2, numpy and Meta's sam_3d_body are imported by load_runtime(), called only after the checkpoint check.
+cv2 = np = torch = SAM3DBodyEstimator = load_sam_3d_body = None
+LINKS = []
+TRUST_FLAG = "--trust-unverified-checkpoint"
+
+
+def load_runtime():
+    global cv2, np, torch, SAM3DBodyEstimator, load_sam_3d_body, LINKS
+    import cv2 as _cv2
+    import numpy as _np
+    import torch as _torch
+    sys.path.insert(0, os.environ.get("SAM3DB_SRC", str(HERE / "src")))
+    from sam_3d_body import SAM3DBodyEstimator as _est, load_sam_3d_body as _load
+    from sam_3d_body.metadata.mhr70 import pose_info
+    cv2, np, torch, SAM3DBodyEstimator, load_sam_3d_body = _cv2, _np, _torch, _est, _load
+    name2id = {v["name"]: k for k, v in pose_info["keypoint_info"].items()}
+    LINKS = [(name2id[a], name2id[b], tuple(int(c) for c in d["color"][::-1]))  # RGB -> BGR for cv2
+             for d in pose_info["skeleton_info"].values() for a, b in [d["link"]] if a in name2id and b in name2id]
+
+
+def check_checkpoint(ck, trust):
+    """Fail closed: exit 2 unless every checkpoint file matches Meta's ids, or the caller passed TRUST_FLAG.
+    Returns True when verified, False when the check was skipped on purpose."""
+    if trust:
+        bar = "!" * 100
+        print(f"{bar}\nWARNING {TRUST_FLAG}: the checkpoint in {ck} is NOT verified. model.ckpt and mhr_model.pt are "
+              f"pickle / TorchScript\nand can run any code when loaded. Use this only for files you have checked "
+              f"yourself. run.json records it.\n{bar}", file=sys.stderr, flush=True)
+        return False
+    print(f"CHECKPOINT verifying {ck} against Meta's published ids (the two big files take a few seconds)", flush=True)
+    ok, _ = verify_checkpoint.verify(ck, emit=lambda line: print("CHECKPOINT " + line, flush=True))
+    if not ok:
+        print(f"run_sam3db.py: REFUSED: the checkpoint in {ck} does not match Meta's published ids, so nothing was "
+              f"loaded. Re-download it (get_checkpoint.sh) and run verify_checkpoint.py until it prints ALL_MATCH.",
+              file=sys.stderr, flush=True)
+        sys.exit(2)
+    return True
 
 
 def frames(path, every, max_frames):
@@ -107,11 +144,15 @@ def main():
     ap.add_argument("--boxes-json", default="", help="per-frame boxes from boxes_from_mask.py; frames not in it are skipped")
     ap.add_argument("--inference", default="full", choices=["full", "body"])
     ap.add_argument("--ckpt-dir", default=os.environ.get("SAM3DB_CKPT_DIR", str(HERE / "checkpoints" / "sam-3d-body-vith")))
+    ap.add_argument(TRUST_FLAG, action="store_true", dest="trust_unverified",
+                    help="DANGEROUS: load the checkpoint without the hash check (files that can run code on load)")
     a = ap.parse_args()
     ck = Path(a.ckpt_dir)
     for f in ("model.ckpt", "model_config.yaml", "assets/mhr_model.pt"):
         if not (ck / f).exists():
             sys.exit(f"MISSING checkpoint file {ck / f} (gated Hugging Face repo facebook/sam-3d-body-vith)")
+    verified = check_checkpoint(ck, a.trust_unverified)  # before torch, cv2 or Meta's code is imported
+    load_runtime()
     # Read the boxes before the model loads: a bad --boxes or an empty --boxes-json stops
     # here, not after a model load under the GPU lease.
     fixed = None if a.boxes == "auto" else np.array(
@@ -119,7 +160,7 @@ def main():
     per_frame = json.load(open(a.boxes_json, encoding="utf-8"))["boxes"] if a.boxes_json else None
     if per_frame is not None and not per_frame:
         sys.exit(f"run_sam3db.py: {a.boxes_json} has no boxes: nothing to run (did boxes_from_mask.py or "
-                 "boxes_by_colour.py find no man?)")
+                 "boxes_by_colour.py find no person?)")
     out = Path(a.out)
     (out / "frames").mkdir(parents=True, exist_ok=True)
     (out / "overlay").mkdir(parents=True, exist_ok=True)
@@ -170,7 +211,9 @@ def main():
            "secs_per_frame": per, "mean_secs": round(float(np.mean(per)), 3) if per else None,
            "peak_alloc_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
            "peak_reserved_gb": round(torch.cuda.max_memory_reserved() / 1e9, 2),
-           "torch": torch.__version__, "source_commit": os.environ.get("SAM3DB_SRC_COMMIT", "unknown")}
+           "torch": torch.__version__, "source_commit": os.environ.get("SAM3DB_SRC_COMMIT", "unknown"),
+           "checkpoint_verified": verified,
+           "checkpoint_check": "verify_checkpoint.verify: ALL_MATCH" if verified else f"SKIPPED ({TRUST_FLAG})"}
     (out / "run.json").write_text(json.dumps(rep, indent=1), encoding="utf-8")
     print("RUN_DONE", json.dumps({k: rep[k] for k in ("frames_done", "load_secs", "mean_secs", "peak_reserved_gb")}))
     if done == 0:  # a run with no frame is a failure, not a silent zero

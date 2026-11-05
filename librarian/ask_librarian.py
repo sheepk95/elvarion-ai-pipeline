@@ -87,7 +87,7 @@ WAKE_TO_ID = ("\"%s\" (the Skill Librarian chat's session id: send to the id, no
               "reaches that chat even when it is not running, e.g. after a PC restart)")
 WAKE_TO_NAME = "\"Skill Librarian\""
 HOST_RE = LI.HOST_RE  # one pattern for the asking chat's id and the librarian's recorded id
-RID_RE = re.compile(r"^[0-9]{8}T[0-9]{12}Z-[0-9]+-[0-9a-f]{8}\Z")
+RID_RE = LI.RID_RE  # one pattern for the ids make_id() files and the ids librarian_inbox.py accepts
 # heartbeat_problem() reasons that still mean a LIVE librarian (it will answer later), so the request is
 # filed for a late answer. Every other reason (no heartbeat, not loaded, stale, unreadable) files nothing.
 LIVE_PROBLEMS = ("an ask timed out", "librarian woke on requests")

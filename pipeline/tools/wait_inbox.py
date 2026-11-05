@@ -4,7 +4,7 @@ item lands, which wakes the idle chat.
 Usage: python -I -B wait_inbox.py <inbox folder> [--timeout 7200]
 Exit 0: prints NEW ITEMS and their paths; it does NOT write <inbox>/.seen: the chat appends each item's file name there
 once it has handled the item, so an item is "unread" (switch_census.py) and wakes a restarted waiter until then. Exit 2: timeout, nothing new: start it
-again. Only items count: files named <UTC>-<from>-<n>.md (writers write .tmp, then rename). Notes such as ACKS.md
+again. Only items count: files named <UTC>-<from>-<n>.md (writers publish a closed temporary file atomically). Notes such as ACKS.md
 never wake the chat (an early trial woke on its own ack file).
 """
 import argparse

@@ -98,6 +98,27 @@ with open(LOG, encoding="ascii") as f:
 check("every run is logged", log_text.count("\n") >= 10 and "skip:out-of-scope" in log_text and "skip:lookup-agent" in log_text,
       log_text[-300:])
 
+# Exercise the shipped command via the platform shell, with spaces in the repository path.
+spaced_root = os.path.join(TMP, "repo with spaces")
+os.makedirs(os.path.join(spaced_root, "hooks"))
+shutil.copyfile(HOOK, os.path.join(spaced_root, "hooks", "inject_recipe.py"))
+with open(os.path.join(HERE, "settings.example.json"), encoding="utf-8") as f:
+    # Follow README's forward-slash substitution before parsing the completed settings file.
+    sample = json.loads(f.read().replace("<PROJECT_ROOT>", spaced_root.replace("\\", "/")))
+for event, arg in (("SessionStart", "session-start"), ("SubagentStart", "subagent-start")):
+    cmd = sample["hooks"][event][0]["hooks"][0]["command"]
+    cmd = cmd.replace("<PROJECT_ROOT>", spaced_root.replace("\\", "/"), 1)
+    cmd = cmd.replace("python ", '"%s" ' % sys.executable, 1)
+    e = {k: v for k, v in os.environ.items() if not k.startswith("INJECT_RECIPE_")}
+    e.update(INJECT_RECIPE_PATH=RECIPE_FILE, INJECT_RECIPE_LOG=LOG, INJECT_RECIPE_ROOTS=PROJECT)
+    p = subprocess.run(cmd, shell=True, input=msg(PROJECT, source="startup", agent_type="general-purpose"),
+                       capture_output=True, text=True, encoding="utf-8", env=e, timeout=60)
+    try:
+        ok = p.returncode == 0 and context(p.stdout) == RECIPE
+    except (ValueError, KeyError):
+        ok = False
+    check("sample %s command handles spaces" % event, ok, p.stderr)
+
 print("RESULT %s (%d failed)" % ("FAIL" if fails else "PASS", len(fails)))
 if fails:
     print("test folder kept: %s" % TMP)       # an uncaught error also leaves it in place

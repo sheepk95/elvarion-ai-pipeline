@@ -16,9 +16,9 @@ MHR facts (read from Meta's source): pred_joint_coords are camera axes = MHR axe
 rotations are in MHR axes (y up, z toward the camera) and NOT negated; MHR returns centimetres.
 Usage: python -I -B sam_to_source.py <run dir> <out.npz> [--drop 24 26] [--keep 62-66 76-80] [--flatten-depth]
        [--hands] [--spike 25 --arm-smooth 3 --arm-joints clavicle,uparm,lowarm,wrist,fingers --hand-world 3]
-The hand options default off. The values shown steadied one test take's sword from 7.5 to 1.5 deg per key.
+The hand options default off. The values shown steadied one test take's held prop from 7.5 to 1.5 deg per key.
 --keep-arms also keeps the arms sharp inside the --keep windows (no flick removal, wrist smoothing or hand-world
-passes there), for takes whose hit is an arm move such as a sword cut; off by default, and with it off the output is
+passes there), for takes whose hit is an arm move such as a swing or strike; off by default, and with it off the output is
 byte-identical to the version before it.
 --keep-arms-sides r limits --keep-arms to one side (default l,r = as before).
 """
@@ -76,12 +76,12 @@ def main():
     ap.add_argument("--arm-joints", default="lowarm,wrist,fingers", help="which arm joints --spike and --arm-smooth "
                     "touch: any of clavicle,uparm,lowarm,wrist,fingers")
     ap.add_argument("--hand-world", type=int, default=0, help="1-2-1 passes on each hand's WORLD turn after everything "
-                    "else (moves no joint; the sword follows it); fingers ride the smoothed hand")
+                    "else (moves no joint; a held prop follows it); fingers ride the smoothed hand")
     ap.add_argument("--keep-arms", action="store_true", help="inside the "
                     "--keep windows also skip --spike, the wrist/finger --arm-smooth passes and --hand-world, so an "
-                    "arm hit (a sword cut) stays sharp. Off by default: the output is then byte-identical to before")
+                    "arm hit (a swing or strike) stays sharp. Off by default: the output is then byte-identical to before")
     ap.add_argument("--keep-arms-sides", default="l,r", help="sides --keep-arms "
-                    "applies to, e.g. r = keep the spear arm sharp but smooth a shield arm SAM misreads in a blurred hit frame")
+                    "applies to, e.g. r = keep the striking arm sharp but smooth the other arm SAM misreads in a blurred hit frame")
     a = ap.parse_args()
     global BODY
     if a.hands:

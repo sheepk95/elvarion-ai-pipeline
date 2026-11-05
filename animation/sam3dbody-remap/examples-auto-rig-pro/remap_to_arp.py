@@ -1,8 +1,8 @@
 # EXAMPLE CODE. Needs Blender, the PAID Auto-Rig Pro add-on (not included, bought separately) and your own rig.
-# Rig, bone and take names below (ARP_HighElf, SAM_victim, ...) are this project's examples: change them.
+# Rig and armature names below (ARP_target, SAM_source, ...) are placeholders: pass your own with --source / --target.
 # ARP Remap the SAM 3D Body source armature onto the target rig, with a preflight and read-backs (step 6 of the remap).
 # blender -b <source.blend from build_source_blender.py> --disable-autoexec --python remap_to_arp.py --
-#     <out.blend> <report.json> [--source SAM_victim] [--target ARP_HighElf]
+#     <out.blend> <report.json> [--source SAM_source] [--target ARP_target]
 # Mapping: explicit (never ARP's auto-map); root -> c_root_master.x is the one root row, read back before and after.
 # Checks after the bake, at every source key: each mapped target bone's WORLD rotation against its source bone (the
 # rests are identical, so this should be ~0), target root head against source root head, joint positions against
@@ -13,7 +13,7 @@ from mathutils import Vector
 argv = sys.argv[sys.argv.index("--") + 1:]
 out_blend, out_json = argv[0], argv[1]
 opt = dict(zip(argv[2::2], argv[3::2]))
-SRC, TGT = opt.get("--source", "SAM_victim"), opt.get("--target", "ARP_HighElf")
+SRC, TGT = opt.get("--source", "SAM_source"), opt.get("--target", "ARP_target")
 # arp_retarget_preflight.py sits beside this script (override the folder with REMAP_PREFLIGHT_DIR)
 sys.path.insert(0, os.environ.get("REMAP_PREFLIGHT_DIR", os.path.dirname(os.path.abspath(__file__))))
 from arp_retarget_preflight import capture, validate  # noqa: E402

@@ -80,6 +80,10 @@ SESSION_EVENTS = ("wait_start", "heartbeat", "wait_refused")  # events only the 
 # a desktop chat's session id. ask_librarian.py uses this same pattern for the asking
 # chat (host_session), and the wake hint uses it for the librarian's recorded id (librarian_session).
 HOST_RE = re.compile(r"^local_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+# A request id, exactly as ask_librarian.make_id() writes it (ask_librarian.py uses this same object). Ids come from
+# file names, so a request file whose name fails it (a newline, "answer_file=", any odd character) is skipped with a
+# warning: its id would otherwise be printed into `list` headers and the answer_file= path.
+RID_RE = re.compile(r"^[0-9]{8}T[0-9]{12}Z-[0-9]+-[0-9a-f]{8}\Z")
 STUCK_CLAIM_S = 60  # a claim this old whose request never left requests/ is finished by the next `list`
 ROLLOVER_REQUESTS = 50  # retired: no longer used by any code; kept so older notes still resolve
 ROLLOVER_COMPACTIONS = 10  # a fresh librarian after every 10 compactions
@@ -292,6 +296,8 @@ def heartbeat_problem(mb, stale_s=STALE_S):
     hb = read_json(hb_path(mb))
     if hb is None:
         return "no heartbeat at %s" % hb_path(mb)
+    if not isinstance(hb, dict):
+        return "heartbeat unreadable"
     if not hb.get("loaded"):
         return "librarian not loaded"
     try:
@@ -370,13 +376,31 @@ def claim_age(mb, rid, suffix=".claim"):
         return None
 
 
+_WARNED_IDS = set()  # bad file names already warned about by this process (`wait` polls every second)
+
+
+def ids_in(mb, sub):
+    """The request ids of <mb>/<sub>/*.json whose file names pass RID_RE. Any other .json there is skipped and named
+    once per process on stderr (as a repr, so a newline in the name shows escaped), never printed into `list` output."""
+    out = []
+    for p in glob.glob(os.path.join(mb, sub, "*.json")):
+        rid = os.path.basename(p)[:-5]
+        if RID_RE.match(rid):
+            out.append(rid)
+        elif (sub, rid) not in _WARNED_IDS:
+            _WARNED_IDS.add((sub, rid))
+            print("WARNING %s/%r.json is not a request id (want e.g. 20260101T000000000000Z-1234-0123abcd): skipped, "
+                  "left where it is" % (sub, rid), file=sys.stderr, flush=True)
+    return out
+
+
 def pending(mb):
     """Request ids still to claim. A request whose claim exists but whose move never finished is
     NOT pending while the claim is under STUCK_CLAIM_S old (its claimer is still moving it), and never again once a
-    sweep was tried (claimed/<id>.sweep), so a stuck claim can no longer wake the librarian forever."""
+    sweep was tried (claimed/<id>.sweep), so a stuck claim can no longer wake the librarian forever.
+    Only file names that pass RID_RE count (ids_in)."""
     out = []
-    for p in glob.glob(os.path.join(mb, "requests", "*.json")):
-        rid = os.path.basename(p)[:-5]
+    for rid in ids_in(mb, "requests"):
         if claim_age(mb, rid, ".sweep") is not None:
             continue
         age = claim_age(mb, rid)
@@ -388,8 +412,7 @@ def pending(mb):
 
 def stuck_claims(mb):
     """Requests left in requests/ although claimed (for status)."""
-    return sorted(os.path.basename(p)[:-5] for p in glob.glob(os.path.join(mb, "requests", "*.json"))
-                  if claim_age(mb, os.path.basename(p)[:-5]) is not None)
+    return sorted(rid for rid in ids_in(mb, "requests") if claim_age(mb, rid) is not None)
 
 
 def answered_ids(mb):
@@ -496,8 +519,8 @@ def claim_all(mb):
 def unanswered_claimed(mb):
     ans = answered_ids(mb)
     out = []
-    for p in sorted(glob.glob(os.path.join(mb, "claimed", "*.json"))):
-        rid = os.path.basename(p)[:-5]
+    for rid in sorted(ids_in(mb, "claimed")):
+        p = os.path.join(mb, "claimed", rid + ".json")
         if rid not in ans:
             d = read_json(p) or {"brief": "(unreadable request file)", "from": "?"}
             d["id"] = rid
@@ -1055,15 +1078,26 @@ def status_lines(mb):
     out = []
     if hb is None:
         out.append("heartbeat: MISSING (%s)" % hb_path(mb))
+    elif not isinstance(hb, dict):
+        out.append("heartbeat: UNREADABLE (%s holds JSON that is not an object)" % hb_path(mb))
+        hb = None
     else:
-        age = time.time() - float(hb.get("epoch", 0))
-        out.append("heartbeat: %s, age %dm%02ds, loaded %s, last_event %s, catalogue index sha256 %s" % (
-            hb.get("utc"), age // 60, age % 60, hb.get("loaded"), hb.get("last_event"),
-            (hb.get("catalogue_index_sha256") or "none")[:12]))
+        # A hand-edited or half-migrated heartbeat must not crash `status`: heartbeat_problem guards the same fields.
+        try:
+            age_txt = "%dm%02ds" % divmod(int(time.time() - float(hb.get("epoch", 0))), 60)
+        except (TypeError, ValueError, OverflowError):
+            age_txt = "unreadable (epoch %r)" % (hb.get("epoch"),)
+        try:
+            this_session = int(hb.get("requests_answered", 0)) - int(hb.get("session_answered_base", 0))
+        except (TypeError, ValueError, OverflowError):
+            this_session = "?"
+        out.append("heartbeat: %s, age %s, loaded %s, last_event %s, catalogue index sha256 %s" % (
+            hb.get("utc"), age_txt, hb.get("loaded"), hb.get("last_event"),
+            str(hb.get("catalogue_index_sha256") or "none")[:12]))
         out.append("counters: requests_answered %s (this session %s, since %s), waits %s, keepalives %s, "
                    "request_wakes %s" % (
                        hb.get("requests_answered", 0),
-                       int(hb.get("requests_answered", 0)) - int(hb.get("session_answered_base", 0)),
+                       this_session,
                        hb.get("session_start_utc", "first start"), hb.get("waits", 0), hb.get("keepalives", 0),
                        hb.get("request_wakes", 0)))
         out.append("rollover: %s%s; compactions this session %s (rollover at %d)" % (
@@ -1080,7 +1114,7 @@ def status_lines(mb):
         " (+%d stop)" % stops if stops else "", cnt("answers", "*.md"), cnt("done", "*.md"),
         ", claimed-but-not-moved %d" % len(stuck) if stuck else ""))
     w = read_json(os.path.join(mb, "watcher.json"))
-    if w:
+    if isinstance(w, dict) and w:
         out.append("watcher: pid %s armed %s (refused duplicates so far: %s)" % (
             w.get("pid"), w.get("utc"), (hb or {}).get("waits_refused", 0)))
     return out

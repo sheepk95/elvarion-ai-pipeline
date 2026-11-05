@@ -10,8 +10,12 @@ GPU. Two such jobs at once make both slow, or crash one of them, or power the ma
 ledger: **book before the GPU loads, release when it stops.**
 
 The tool is `scripts/gpu_lease.py` (standard library only; Windows is the tested platform). The ledger is a folder of
-small JSON files, by default `~/.gpu-lease` (set `GPU_LEASE_DIR` to move it). It is files, not a database: taking the
-lock needs an atomic file create.
+small JSON files, by default `~/.gpu-lease` (set `GPU_LEASE_DIR` to move it). Ledger changes use a kernel lock on the
+persistent `.lock` file. Never delete or rename that file while clients are running.
+
+**Upgrade:** stop all old-version clients before moving a ledger to this version, including long-running services that
+import the module. Older versions rename `.lock` as a stale-lock recovery mechanism and cannot safely share a ledger
+with this version. Restart clients only after they all use the new version. This change does not upgrade running clients.
 
 ## The rule
 
@@ -27,7 +31,9 @@ lock needs an atomic file create.
    python -B scripts/gpu_lease.py claim --who "<chat title>" --what "<job>" --gb 8 --pid <job pid> --wait 1800
    python -B scripts/gpu_lease.py release <lease id> --note "done"
    ```
-3. **Exit 3 means busy** (the card is booked, or the request is refused). The message names who holds it. Wait
+3. **Exit 3 means busy** (the card is booked, or the request is refused). The message names who holds it. Exit 1
+   with `GPU LEDGER ERROR` means required process or GPU-memory telemetry was unavailable: restore PowerShell/CIM and
+   `nvidia-smi`, then retry. The job was not started. `status` still reports degraded telemetry. Wait
    (`--wait <seconds>` queues you, first come first served) or do other work. Never start the job anyway, never
    delete or rename another agent's lease, never cut someone else's job short.
 
@@ -42,7 +48,13 @@ lock needs an atomic file create.
 | `adopt <id> <pid>` | Count another process tree (for example one started with `Start-Process`) as part of the lease, so it is not counted twice. |
 | `release <id> [--note ...]` | Close the lease. The record moves to `closed/` and is never deleted. |
 
-Exit codes: 0 ok, 3 busy / refused / no such lease, 2 bad arguments, 1 tool error.
+Exit codes: 0 ok (including an already-closed or unknown id for idempotent `release`), 3 busy / refused or missing
+lease for `renew` / `adopt`, 2 bad arguments, 1 tool or telemetry error. `run` returns its command's own exit code
+(127 if the command cannot be started) and gives the command the booking id as the `GPU_LEASE_ID` environment
+variable, so a launcher it starts can `adopt` its own process tree.
+
+Each booking also records its process's start time, so a dead job whose process id the system has handed to a new
+process no longer keeps the booking open (Windows, and Linux with `/proc`; elsewhere the plain pid check applies).
 
 ## How much to book (`--gb`, peak VRAM)
 
@@ -62,6 +74,11 @@ measure (`torch.cuda.max_memory_allocated()`) and add 1 GB. Unsure: book high, t
 
 - No open exclusive lease; an exclusive claim needs nothing else open.
 - Booked GB + recognised unbooked programs + yours is within the budget, and `nvidia-smi` shows your GB plus 0.5 GB free.
+- Process enumeration and free-memory telemetry must both succeed. Admission fails closed if either is unavailable;
+  process enumeration currently requires Windows and PowerShell/CIM.
+- Admission samples telemetry after taking the ledger lock, so it does not reuse a snapshot from before a lock wait.
+  The telemetry commands have bounded timeouts; other ledger clients may wait while they finish. This remains a
+  cooperative protocol: an unbooked process can start after any snapshot, so every participating launcher must book.
 - Nobody is ahead of you in the queue.
 - Legacy flag files (`GPU_HEAVY`, an unexpired `UNITY_PRIORITY` written by another tool) count as someone else's
   exclusive booking. The folder is `GPU_LEASE_CONS_PORT` (default: `<temp folder>/cons-port`).
@@ -82,6 +99,10 @@ measure (`torch.cuda.max_memory_allocated()`) and add 1 GB. Unsure: book high, t
 - A killed `run` wrapper leaves its child running unbooked once the 5-minute heartbeat lapses.
 
 ## Proof
+
+`python -B scripts/test_gpu_safety.py` uses isolated temporary files and stubbed telemetry to check live-holder
+exclusion, crash recovery, concurrent ledger updates, queue priority, telemetry failure and status reporting. It does
+not access a real GPU or ledger.
 
 `python -B scripts/selftest.py` runs against a throwaway folder (never a real ledger): shared and exclusive admission,
 the budget, dead-pid and expiry reaping, the legacy flags, a reader holding a flag open during renew and release,
